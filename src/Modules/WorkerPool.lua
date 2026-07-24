@@ -204,15 +204,7 @@ function pool:GetBuildXml(build)
 	end
 	if fresh then
 		local t0 = GetTime()
-		local text = build:SaveDB("worker sync")
-		if text then
-			-- The Build section embeds display stats from the last calculation
-			-- (PlayerStat/MinionStat/FullDPSSkill). They are output, not input: the
-			-- pre-recalc and post-recalc serializations of the same edit differ only
-			-- here, and leaving them in would resync every worker twice per edit.
-			-- Workers recalculate everything anyway and never read these.
-			text = text:gsub("%s*<PlayerStat[^>]*/>", ""):gsub("%s*<MinionStat[^>]*/>", ""):gsub("%s*<FullDPSSkill[^>]*/>", "")
-		end
+		local text = self:StripSyncText(build:SaveDB("worker sync"))
 		if text and text ~= cache.text then
 			self.lastContentChange = GetTime()
 			cache.sections = self:SplitSections(text)
@@ -222,6 +214,18 @@ function pool:GetBuildXml(build)
 		cache.text = text
 	end
 	return cache.text
+end
+
+-- The Build section embeds display stats from the last calculation
+-- (PlayerStat/MinionStat/FullDPSSkill). They are output, not input: the
+-- pre-recalc and post-recalc serializations of the same edit differ only
+-- there, and leaving them in would resync every worker twice per edit.
+-- Workers recalculate everything anyway and never read these.
+function pool:StripSyncText(text)
+	if not text then
+		return nil
+	end
+	return (text:gsub("%s*<PlayerStat[^>]*/>", ""):gsub("%s*<MinionStat[^>]*/>", ""):gsub("%s*<FullDPSSkill[^>]*/>", ""))
 end
 
 -- Splits a serialized build into its top-level sections, each with its composed
@@ -297,7 +301,9 @@ end
 -- Called from Build:OnFrame around the main-thread recalculation so the stall
 -- shows up in the timing log next to the sync/batch events
 function pool:LogMainRecalc(ms)
-	if self.started then
+	-- Only meaningful (and only wanted in the log) when workers exist; also
+	-- keeps headless runs, where the pool can never start, quiet
+	if self.aliveCount > 0 then
 		plog("WorkerPool: main-thread recalc took %dms", ms)
 	end
 end
