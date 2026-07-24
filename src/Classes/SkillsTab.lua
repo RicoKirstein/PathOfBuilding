@@ -1043,6 +1043,54 @@ function SkillsTabClass:ProcessGemLevel(gemData, imbued)
 	end
 end
 
+-- Calculates the build's output with the given gem temporarily staged into
+-- group.gemList[index], restoring the previous state afterwards. Existing gems
+-- keep their own quality and enablement; empty slots get a default instance.
+-- Shared by the gem dropdown (GemSelectControl:CalcOutputWithThisGem) and the
+-- calculation pool workers (WorkerJobs gemDps), which must agree exactly.
+function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFullDPS, imbued)
+	local gemList = group.gemList
+	local oldGem
+	if gemList[index] then
+		oldGem = copyTable(gemList[index], true)
+	else
+		gemList[index] = {
+			level = gemData.naturalMaxLevel,
+			quality = self.defaultGemQuality or 0,
+			count = 1,
+			enabled = true,
+			enableGlobal1 = true,
+			enableGlobal2 = true,
+			gemId = gemData.id,
+			nameSpec = gemData.name,
+			skillId = gemData.grantedEffectId
+		}
+	end
+
+	-- Create gemInstance to represent the hovered gem
+	local gemInstance = gemList[index]
+	gemInstance.level = self:ProcessGemLevel(gemData, imbued)
+	gemInstance.gemData = gemData
+	gemInstance.displayEffect = nil
+	-- Calculate the impact of using this gem
+	local output = calcFunc(nil, useFullDPS)
+	-- Put the original gem back into the list
+	if oldGem then
+		gemInstance.gemData = oldGem.gemData
+		gemInstance.level = oldGem.level
+		gemInstance.displayEffect = oldGem.displayEffect
+	else
+		gemList[index] = nil
+	end
+	return output, gemInstance
+end
+
+-- The output value the gem dropdown sorts by; shared by its synchronous sort
+-- and the calculation pool workers
+function SkillsTabClass.ExtractGemDps(output, dpsField)
+	return (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
+end
+
 -- Processes the given socket group, filling in information that will be used for display or calculations
 function SkillsTabClass:ProcessSocketGroup(socketGroup)
 	-- Loop through the skill gem list

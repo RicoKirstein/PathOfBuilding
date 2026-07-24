@@ -231,6 +231,39 @@ describe("WorkerPool", function()
 			end
 		end)
 
+		it("gemDps matches the dropdown for an occupied slot with non-default quality", function()
+			-- Candidates evaluated for an occupied slot must inherit the existing
+			-- gem's quality, exactly as the dropdown's hover calculation does; the
+			-- pre-refactor worker copy reset it to the default quality instead
+			addSocketGroup()
+			build.skillsTab.displayGroup = build.skillsTab.socketGroupList[1]
+			build.skillsTab.displayGroup.gemList[1].quality = 7
+			build.buildFlag = true
+			runCallback("OnFrame")
+			local candidate
+			for gemId, gemData in pairs(build.data.gems) do
+				if gemData.grantedEffect and not gemData.grantedEffect.support and not gemData.grantedEffect.hideFromGemList and gemData.name ~= "Cleave" then
+					if not candidate or gemId < candidate then
+						candidate = gemId
+					end
+				end
+			end
+			local calcFunc = build.calcsTab:GetMiscCalculator()
+			local uiControl = { skillsTab = build.skillsTab, index = 1 }
+			local output = common.classes.GemSelectControl.CalcOutputWithThisGem(uiControl, calcFunc, build.data.gems[candidate], false)
+			local expected = build.skillsTab.ExtractGemDps(output, "CombinedDPS")
+			local results = workerJobs.handlers.gemDps({
+				groupIndex = 1,
+				gemIndex = 1,
+				dpsField = "CombinedDPS",
+				defaultLevel = build.skillsTab.defaultGemLevel,
+				defaultQuality = build.skillsTab.defaultGemQuality,
+				gemIds = { candidate },
+			})
+			assert.is_nil(results.workerError)
+			assert.are.equal(expected, results[candidate])
+		end)
+
 		it("itemPower matches the ItemDBControl sort", function()
 			addSocketGroup()
 			local statEntry

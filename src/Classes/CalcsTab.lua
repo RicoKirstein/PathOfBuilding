@@ -491,6 +491,67 @@ function CalcsTabClass:BuildPower()
 end
 
 -- Estimate the offensive and defensive power of all unallocated nodes
+-- A tree node with the given mastery effect's stats applied, as used to
+-- evaluate assigning that effect
+function CalcsTabClass.BuildMasteryEffectNode(spec, node, effect)
+	local effectNode = {
+		id = node.id,
+		type = node.type,
+		name = node.name,
+		sd = { },
+	}
+	for i, sd in ipairs(effect.sd or { }) do
+		effectNode.sd[i] = sd
+	end
+	spec.tree:ProcessStats(effectNode)
+	return effectNode
+end
+
+-- Builds the calculation override for one node-power evaluation key; lives
+-- next to the PowerBuilder code that generates the keys, and is used by the
+-- calculation pool workers (WorkerJobs nodePower) to interpret them, so the
+-- two sides cannot drift. Keys: "123" adds node 123, "r123" removes allocated
+-- node 123, "m123/456" tries mastery effect 456 on mastery node 123, "c<name>"
+-- adds the cluster notable by name, "p123" removes allocated node 123 plus its
+-- dependents. Returns the override and the node it evaluates.
+function CalcsTabClass.BuildNodePowerOverride(spec, key)
+	key = tostring(key)
+	local removeId = key:match("^r(%d+)$")
+	local masteryId, effectId = key:match("^m(%d+)/(%d+)$")
+	if removeId then
+		local node = spec.nodes[tonumber(removeId)]
+		if node then
+			return { removeNodes = { [node] = true } }, node
+		end
+	elseif masteryId then
+		local node = spec.nodes[tonumber(masteryId)]
+		local effect = spec.tree.masteryEffects[tonumber(effectId)]
+		if node and effect then
+			local effectNode = CalcsTabClass.BuildMasteryEffectNode(spec, node, effect)
+			return { addNodes = { [effectNode] = true } }, effectNode
+		end
+	elseif key:byte(1) == 99 then -- "c<name>": cluster notable by name
+		local node = spec.tree.clusterNodeMap[key:sub(2)]
+		if node then
+			return { addNodes = { [node] = true } }, node
+		end
+	elseif key:byte(1) == 112 then -- "p<id>": allocated node plus its dependents removed
+		local node = spec.nodes[tonumber(key:sub(2))]
+		if node and node.depends then
+			local pathNodes = { }
+			for _, depNode in ipairs(node.depends) do
+				pathNodes[depNode] = true
+			end
+			return { removeNodes = pathNodes }, node
+		end
+	else
+		local node = spec.nodes[tonumber(key)]
+		if node then
+			return { addNodes = { [node] = true } }, node
+		end
+	end
+end
+
 function CalcsTabClass:PowerBuilder()
 	-- local timer_start = GetTime()
 	-- The FullDPS roll-up is only needed when it is the selected power stat; for all
@@ -520,17 +581,7 @@ function CalcsTabClass:PowerBuilder()
 	end
 
 	local function buildMasteryEffectNode(node, effect)
-		local effectNode = {
-			id = node.id,
-			type = node.type,
-			name = node.name,
-			sd = { },
-		}
-		for i, sd in ipairs(effect.sd or { }) do
-			effectNode.sd[i] = sd
-		end
-		self.build.spec.tree:ProcessStats(effectNode)
-		return effectNode
+		return CalcsTabClass.BuildMasteryEffectNode(self.build.spec, node, effect)
 	end
 
 	local function masteryEffectCanBeAssignedToNode(node, masteryEffect)
@@ -722,12 +773,8 @@ function CalcsTabClass:PowerBuilder()
 					node.power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
 					if node.depends and not node.ascendancyName then
 						node.power.pathPower = node.power.singleStat
-						local pathNodes = { }
-						for _, node in pairs(node.depends) do
-							pathNodes[node] = true
-						end
 						if #node.depends > 1 then
-							local pathOutput = (pooledOutputs and pooledOutputs.results["p" .. nodeId]) or calcFunc({ removeNodes = pathNodes }, useFullDPS)
+							local pathOutput = (pooledOutputs and pooledOutputs.results["p" .. nodeId]) or calcFunc(self.BuildNodePowerOverride(self.build.spec, "p" .. nodeId), useFullDPS)
 							node.power.pathPower = self:CalculatePowerStat(self.powerStat, pathOutput, calcBase)
 						end
 					end

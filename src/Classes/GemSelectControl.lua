@@ -56,48 +56,17 @@ local GemSelectClass = newClass("GemSelectControl", "EditControl", function(self
 end)
 
 function GemSelectClass:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
-	local gemList = self.skillsTab.displayGroup.gemList
-	local displayGemList = self.skillsTab.displayGroup.displayGemList
-	local oldGem
+	local displayGroup = self.skillsTab.displayGroup
+	local displayGemList = displayGroup.displayGemList
 
 	-- the imbuedSupport control actively switches to the latest index of the current displayGroup's gemList so we can use the canSupport filtering
 	if self.imbuedSelect then
-		self.index = #gemList + 1
+		self.index = #displayGroup.gemList + 1
 	end
-	if gemList[self.index] then
-		oldGem = copyTable(gemList[self.index], true)
-	else
-		gemList[self.index] = {
-			level = gemData.naturalMaxLevel,
-			quality = self.skillsTab.defaultGemQuality or 0,
-			count = 1,
-			enabled = true,
-			enableGlobal1 = true,
-			enableGlobal2 = true,
-			gemId = gemData.id,
-			nameSpec = gemData.name,
-			skillId = gemData.grantedEffectId
-		}
-	end
+	local output, gemInstance = self.skillsTab:CalcGemSwapOutput(displayGroup, self.index, gemData, calcFunc, useFullDPS, self.imbuedSelect)
 
-	-- Create gemInstance to represent the hovered gem
-	local gemInstance = gemList[self.index]
-	gemInstance.level = self.skillsTab:ProcessGemLevel(gemData, self.imbuedSelect)
-	gemInstance.gemData = gemData
-	gemInstance.displayEffect = nil
-	-- Calculate the impact of using this gem
-	local output = calcFunc(nil, useFullDPS)
-	-- Put the original gem back into the list
-	if oldGem then
-		gemInstance.gemData = oldGem.gemData
-		gemInstance.level = oldGem.level
-		gemInstance.displayEffect = oldGem.displayEffect
-	else
-		gemList[self.index] = nil
-	end
-	
-	self.skillsTab.displayGroup.displayGemList = displayGemList
-	
+	displayGroup.displayGemList = displayGemList
+
 	return output, gemInstance
 end
 
@@ -431,8 +400,7 @@ function GemSelectClass:UpdateSortCache()
 			-- Ignore gems that don't support the active skill
 			if sortCache.canSupport[gemId] or (gemData.grantedEffect.hasGlobalEffect and not gemData.grantedEffect.support) then
 				local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
-				-- Check for nil because some fields may not be populated, default to 0
-				sortCache.dps[gemId] = (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
+				sortCache.dps[gemId] = self.skillsTab.ExtractGemDps(output, dpsField)
 			end
 			applyDpsColor(gemId)
 		end

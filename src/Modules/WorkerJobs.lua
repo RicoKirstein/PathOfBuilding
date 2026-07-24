@@ -12,8 +12,9 @@ local workerJobs = { }
 local jobHandlers = { }
 workerJobs.handlers = jobHandlers
 
--- DPS values of candidate gems placed into a specific gem slot; mirrors
--- GemSelectControl:CalcOutputWithThisGem and the extraction in BuildSortCache
+-- DPS values of candidate gems placed into a specific gem slot; the staging
+-- and extraction are the same code the gem dropdown runs
+-- (SkillsTab:CalcGemSwapOutput / SkillsTab.ExtractGemDps)
 function jobHandlers.gemDps(payload)
 	local skillsTab = build.skillsTab
 	local group = skillsTab.socketGroupList[payload.groupIndex]
@@ -22,9 +23,6 @@ function jobHandlers.gemDps(payload)
 	end
 	skillsTab.defaultGemLevel = payload.defaultLevel
 	skillsTab.defaultGemQuality = payload.defaultQuality
-	local gemList = group.gemList
-	local index = payload.gemIndex
-	local oldGem = gemList[index] and copyTable(gemList[index], true)
 	local calcFunc = build.calcsTab:GetMiscCalculator()
 	local dpsField = payload.dpsField
 	local useFullDPS = dpsField == "FullDPS"
@@ -38,34 +36,20 @@ function jobHandlers.gemDps(payload)
 			gemData = rawId and build.data.gems[rawId]
 		end
 		if gemData then
-			gemList[index] = {
-				level = gemData.naturalMaxLevel,
-				quality = skillsTab.defaultGemQuality or 0,
-				count = 1,
-				enabled = true,
-				enableGlobal1 = true,
-				enableGlobal2 = true,
-				gemId = gemData.id,
-				nameSpec = gemData.name,
-				skillId = gemData.grantedEffectId,
-			}
-			local gemInstance = gemList[index]
-			gemInstance.level = skillsTab:ProcessGemLevel(gemData)
-			gemInstance.gemData = gemData
-			local okCalc, output = pcall(calcFunc, nil, useFullDPS)
+			local okCalc, output = pcall(skillsTab.CalcGemSwapOutput, skillsTab, group, payload.gemIndex, gemData, calcFunc, useFullDPS)
 			if okCalc and output then
-				results[gemId] = (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
+				results[gemId] = skillsTab.ExtractGemDps(output, dpsField)
 			elseif not results.workerError then
 				results.workerError = "gemDps: " .. tostring(output)
 			end
 		end
 	end
-	gemList[index] = oldGem
 	return results
 end
 
 -- Measured power of candidate items (each given as raw item text) tried in a
--- slot; mirrors the stat-sort loop in ItemDBControl:ListBuilder
+-- slot; the measuring is the same code the item DB sort runs
+-- (ItemsTab:MeasureItemPower)
 function jobHandlers.itemPower(payload)
 	local calcFunc = build.calcsTab:GetMiscCalculator()
 	local useFullDPS = payload.stat == "FullDPS"
@@ -77,23 +61,13 @@ function jobHandlers.itemPower(payload)
 		end
 	end
 	local results = { }
+	if not statEntry then
+		return results
+	end
 	for key, raw in pairs(payload.items) do
 		local item = new("Item", raw)
 		if item.base then
-			local best
-			for _, slotName in ipairs(payload.slots) do
-				if build.itemsTab:IsItemValidForSlot(item, slotName) then
-					local override = item.base.flask and { toggleFlask = item } or item.base.tincture and { toggleTincture = item } or { repSlotName = slotName, repItem = item }
-					local okCalc, output = pcall(calcFunc, override, useFullDPS)
-					if okCalc and output and statEntry then
-						local power = data.powerStatList.GetFromOutput(output, statEntry)
-						if not best or power > best then
-							best = power
-						end
-					end
-				end
-			end
-			results[key] = best
+			results[key] = build.itemsTab:MeasureItemPower(item, statEntry, calcFunc, useFullDPS, payload.slots)
 		end
 	end
 	return results
@@ -117,49 +91,12 @@ function jobHandlers.nodePower(payload)
 		end
 		return vec
 	end
-	-- Entries are typed: "123" adds node 123, "r123" removes allocated node 123,
-	-- "m123/456" tries mastery effect 456 on mastery node 123
+	-- Key formats are defined by CalcsTab.BuildNodePowerOverride, next to the
+	-- PowerBuilder code that generates them
+	local buildOverride = build.calcsTab.BuildNodePowerOverride
 	for _, entry in ipairs(payload.nodeIds) do
-		local override
 		local key = tostring(entry)
-		local removeId = key:match("^r(%d+)$")
-		local masteryId, effectId = key:match("^m(%d+)/(%d+)$")
-		if removeId then
-			local node = build.spec.nodes[tonumber(removeId)]
-			if node then
-				override = { removeNodes = { [node] = true } }
-			end
-		elseif masteryId then
-			local node = build.spec.nodes[tonumber(masteryId)]
-			local effect = build.spec.tree.masteryEffects[tonumber(effectId)]
-			if node and effect then
-				local effectNode = { id = node.id, type = node.type, name = node.name, sd = { } }
-				for i, sd in ipairs(effect.sd or { }) do
-					effectNode.sd[i] = sd
-				end
-				build.spec.tree:ProcessStats(effectNode)
-				override = { addNodes = { [effectNode] = true } }
-			end
-		elseif key:byte(1) == 99 then -- "c<name>": cluster notable by name
-			local node = build.spec.tree.clusterNodeMap[key:sub(2)]
-			if node then
-				override = { addNodes = { [node] = true } }
-			end
-		elseif key:byte(1) == 112 then -- "p<id>": allocated node plus its dependents removed
-			local node = build.spec.nodes[tonumber(key:sub(2))]
-			if node and node.depends then
-				local pathNodes = { }
-				for _, depNode in ipairs(node.depends) do
-					pathNodes[depNode] = true
-				end
-				override = { removeNodes = pathNodes }
-			end
-		else
-			local node = build.spec.nodes[tonumber(key)]
-			if node then
-				override = { addNodes = { [node] = true } }
-			end
-		end
+		local override = buildOverride(build.spec, key)
 		if override then
 			local okCalc, output = pcall(calcFunc, override, payload.useFullDPS)
 			if okCalc and output then

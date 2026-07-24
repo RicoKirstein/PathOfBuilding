@@ -2192,6 +2192,39 @@ function ItemsTabClass:GetComparisonSlotNameForItem(item)
 end
 -- Check if the given item could be equipped in the given slot, taking into account possible conflicts with currently equipped items
 -- For example, a shield is not valid for Weapon 2 if Weapon 1 is a staff, and a wand is not valid for Weapon 2 if Weapon 1 is a dagger
+-- Names of the slots an item could currently be equipped into (active slots of
+-- the current weapon set); shared by the item DB sort and the calculation pool
+function ItemsTabClass:GetEquippableSlotNames()
+	local slotNames = { }
+	for slotName, slot in pairs(self.slots) do
+		if not slot.inactive and (not slot.weaponSet or slot.weaponSet == (self.activeItemSet.useSecondWeaponSet and 2 or 1)) then
+			t_insert(slotNames, slotName)
+		end
+	end
+	return slotNames
+end
+
+-- Measured power of an item tried in each given slot (best value wins), as
+-- sorted on by the item DB; returns nil if the item fits no slot. Shared by
+-- ItemDBControl:ListBuilder and the calculation pool workers (WorkerJobs
+-- itemPower), which must agree exactly.
+function ItemsTabClass:MeasureItemPower(item, statEntry, calcFunc, useFullDPS, slotNames)
+	local best
+	for _, slotName in ipairs(slotNames or self:GetEquippableSlotNames()) do
+		if self:IsItemValidForSlot(item, slotName) then
+			local override = item.base.flask and { toggleFlask = item } or item.base.tincture and { toggleTincture = item } or { repSlotName = slotName, repItem = item }
+			local output = calcFunc(override, useFullDPS)
+			if output then
+				local power = data.powerStatList.GetFromOutput(output, statEntry)
+				if not best or power > best then
+					best = power
+				end
+			end
+		end
+	end
+	return best
+end
+
 function ItemsTabClass:IsItemValidForSlot(item, slotName, itemSet)
 	itemSet = itemSet or self.activeItemSet
 	local slotType, slotId = slotName:match("^([%a ]+) (%d+)$")

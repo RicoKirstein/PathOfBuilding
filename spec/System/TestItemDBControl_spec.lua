@@ -17,6 +17,9 @@ describe("ItemDBControl", function()
 			[betterItem] = 80,
 			[worseItem] = 120,
 		}
+		if not common.classes.ItemsTab then
+			LoadModule("Classes/ItemsTab")
+		end
 		local itemsTab = {
 			activeItemSet = { useSecondWeaponSet = false },
 			slots = { ["Body Armour"] = {} },
@@ -32,6 +35,9 @@ describe("ItemDBControl", function()
 			IsItemValidForSlot = function(_, item)
 				return item ~= invalidItem
 			end,
+			-- The list builder measures through the shared ItemsTab methods
+			GetEquippableSlotNames = common.classes.ItemsTab.GetEquippableSlotNames,
+			MeasureItemPower = common.classes.ItemsTab.MeasureItemPower,
 		}
 		local control = new("ItemDBControl", nil, { 0, 0, 100, 100 }, itemsTab, {
 			list = { invalidItem, betterItem, worseItem },

@@ -245,12 +245,7 @@ function ItemDBClass:ListBuilder()
 		local pool = main.workerPool
 		local pooled = false
 		if pool and pool:IsAvailable() then
-			local slots = { }
-			for slotName, slot in pairs(self.itemsTab.slots) do
-				if not slot.inactive and (not slot.weaponSet or slot.weaponSet == (self.itemsTab.activeItemSet.useSecondWeaponSet and 2 or 1)) then
-					t_insert(slots, slotName)
-				end
-			end
+			local slots = self.itemsTab:GetEquippableSlotNames()
 			-- Small fixed shards: they pipeline better across workers, give progress
 			-- updates, and bound how long anything queued behind them waits for a
 			-- worker; item evaluations can run hundreds of ms each
@@ -296,14 +291,7 @@ function ItemDBClass:ListBuilder()
 			-- results already merged above
 		else
 		for itemIndex, item in ipairs(list) do
-			item.measuredPower = -math.huge
-			for slotName, slot in pairs(self.itemsTab.slots) do
-				if self.itemsTab:IsItemValidForSlot(item, slotName) and not slot.inactive and (not slot.weaponSet or slot.weaponSet == (self.itemsTab.activeItemSet.useSecondWeaponSet and 2 or 1)) then
-					local output = calcFunc(item.base.flask and { toggleFlask = item } or item.base.tincture and { toggleTincture = item } or { repSlotName = slotName, repItem = item }, useFullDPS)
-					local measuredPower = data.powerStatList.GetFromOutput(output, self.sortDetail)
-					item.measuredPower = m_max(item.measuredPower, measuredPower)
-				end
-			end
+			item.measuredPower = self.itemsTab:MeasureItemPower(item, self.sortDetail, calcFunc, useFullDPS) or -math.huge
 			local now = GetTime()
 			if now - start > 50 then
 				self.defaultText = "^7Sorting... ("..m_floor(itemIndex/#list*100).."%)"
