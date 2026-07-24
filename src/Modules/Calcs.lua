@@ -134,7 +134,10 @@ function calcs.getMiscCalculator(build)
 	return function(override, useFullDPS)
 		local env, cachedPlayerDB, cachedEnemyDB, cachedMinionDB = calcs.initEnv(build, "CALCULATOR", override)
 		calcs.perform(env)
-		if (useFullDPS ~= false or build.viewMode == "TREE") and usedFullDPS then
+		-- Callers pass useFullDPS = false when the stat they read does not come from the
+		-- FullDPS roll-up (only the "FullDPS" power stat does), letting them skip the
+		-- per-skill recalculation below entirely
+		if useFullDPS ~= false and usedFullDPS then
 			-- prevent upcoming calculation from using Cached Data and thus forcing it to re-calculate new FullDPS roll-up 
 			-- without this, FullDPS increase/decrease when for node/item/gem comparison would be all 0 as it would be comparing
 			-- A with A (due to cache reuse) instead of A with B

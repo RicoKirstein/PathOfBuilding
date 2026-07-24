@@ -434,6 +434,11 @@ end
 function CalcsTabClass:BuildOutput()
 	self.powerBuildFlag = true
 
+	-- Invalidate the cross-pass node modifier list cache (see calcs.buildModListForNode);
+	-- anything about the build may have changed since the last output build
+	self.build.nodeModListCache = { }
+	self.build.radiusJewelNodeSet = nil
+
 	--[[
 	local start = GetTime()
 	SetProfiling(true)
@@ -488,7 +493,9 @@ end
 -- Estimate the offensive and defensive power of all unallocated nodes
 function CalcsTabClass:PowerBuilder()
 	-- local timer_start = GetTime()
-	local useFullDPS = self.powerStat and self.powerStat.stat == "FullDPS"
+	-- The FullDPS roll-up is only needed when it is the selected power stat; for all
+	-- other stats an explicit false skips its per-skill recalculation for every node
+	local useFullDPS = (self.powerStat and self.powerStat.stat == "FullDPS") or false
 	local calcFunc, calcBase = self:GetMiscCalculator()
 	local cache = { }
 	local distanceMap = { }

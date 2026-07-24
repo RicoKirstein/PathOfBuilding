@@ -112,7 +112,17 @@ function calcs.initModDB(env, modDB)
 end
 
 function calcs.buildModListForNode(env, node)
-	local modList = new("ModList")
+	-- The processed mod list for most nodes is invariant between calculator passes
+	-- (per-pass state only matters for radius jewels and allocation-sensitive flags),
+	-- so it is cached across passes; the cache is invalidated on every build update
+	local nodeModListCache = env.build.nodeModListCache
+	local cached = nodeModListCache and nodeModListCache[node]
+	if cached then
+		node.grantedSkills = cached.grantedSkills
+		return cached.modList, cached.explode
+	end
+
+	local modList = newModList()
 	if node.type == "Keystone" then
 		modList:AddMod(node.keystoneMod)
 	else
@@ -126,14 +136,15 @@ function calcs.buildModListForNode(env, node)
 		end
 	end
 
-	if modList:Flag(nil, "PassiveSkillHasNoEffect") or (env.allocNodes[node.id] and modList:Flag(nil, "AllocatedPassiveSkillHasNoEffect")) then
+	local allocSensitive = modList:Flag(nil, "AllocatedPassiveSkillHasNoEffect")
+	if modList:Flag(nil, "PassiveSkillHasNoEffect") or (env.allocNodes[node.id] and allocSensitive) then
 		wipeTable(modList)
 	end
 
 	-- Apply effect scaling
 	local scale = calcLib.mod(modList, nil, "PassiveSkillEffect")
 	if scale ~= 1 then
-		local scaledList = new("ModList")
+		local scaledList = newModList()
 		scaledList:ScaleAddList(modList, scale)
 		modList = scaledList
 	end
@@ -164,7 +175,15 @@ function calcs.buildModListForNode(env, node)
 		end
 	end
 
-	return modList, modList:Flag(nil, "CanExplode") and node
+	local explode = modList:Flag(nil, "CanExplode") and node
+	-- Only cache once the set of radius-jewel-affected nodes is known (populated by the
+	-- first full pass), and never cache nodes whose result depends on per-pass state
+	local radiusNodes = env.build.radiusJewelNodeSet
+	if nodeModListCache and radiusNodes and not radiusNodes[node.id] and not allocSensitive then
+		nodeModListCache[node] = { modList = modList, explode = explode, grantedSkills = node.grantedSkills }
+	end
+
+	return modList, explode
 end
 
 -- Build list of modifiers from the listed tree nodes
@@ -176,7 +195,7 @@ function calcs.buildModListForNodeList(env, nodeList, finishJewels)
 	end
 
 	-- Add node modifiers
-	local modList = new("ModList")
+	local modList = newModList()
 	local explodeSources = {}
 	for _, node in pairs(nodeList) do
 		local nodeModList, explode = calcs.buildModListForNode(env, node)
@@ -978,7 +997,7 @@ function calcs.initEnv(build, mode, override, specEnv)
 				end
 				if item.type == "Shield" and env.allocNodes[45175] and env.allocNodes[45175].dn == "Necromantic Aegis" then
 					-- Special handling for Necromantic Aegis
-					env.aegisModList = new("ModList")
+					env.aegisModList = newModList()
 					for _, mod in ipairs(srcList) do
 						-- Filter out mods that apply to socketed gems, or which add supports
 						local add = true
@@ -1031,7 +1050,7 @@ function calcs.initEnv(build, mode, override, specEnv)
 					end
 				elseif slotName == "Weapon 1" and item.name == "The Iron Mass, Gladius" then
 					-- Special handling for The Iron Mass
-					env.theIronMass = new("ModList")
+					env.theIronMass = newModList()
 					for _, mod in ipairs(srcList) do
 						-- Filter out mods that apply to socketed gems, or which add supports
 						local add = true
@@ -1049,7 +1068,7 @@ function calcs.initEnv(build, mode, override, specEnv)
 					end
 				elseif slotName == "Weapon 1" and item.grantedSkills[1] and item.grantedSkills[1].skillId == "UniqueAnimateWeapon" then
 					-- Special handling for The Dancing Dervish
-					env.weaponModList1 = new("ModList")
+					env.weaponModList1 = newModList()
 					for _, mod in ipairs(srcList) do
 						-- Filter out mods that apply to socketed gems, or which add supports
 						local add = true
@@ -1108,25 +1127,25 @@ function calcs.initEnv(build, mode, override, specEnv)
 					local widowHailMod= (1 + (items["Weapon 1"] and items["Weapon 1"].baseModList:Sum("INC", nil, "EffectOfBonusesFromQuiver") + env.initialNodeModDB:Sum("INC", nil, "EffectOfBonusesFromQuiver") or 100) / 100)
 					scale = scale * widowHailMod
 					env.modDB:NewMod("WidowHailMultiplier", "BASE", widowHailMod, "Widowhail")
-					local combinedList = new("ModList")
+					local combinedList = newModList()
 					for _, mod in ipairs(srcList) do
 						combinedList:MergeMod(mod)
 					end
 					env.itemModDB:ScaleAddList(combinedList, scale)
 				elseif env.modDB.multipliers["Corrupted" .. item.rarity:gsub("(%a)(%u*)", function(a, b) return a..string.lower(b) end) .. "JewelEffect"] and item.type == "Jewel" and item.corrupted and slot.nodeId and item.base.subType ~= "Charm" and not env.spec.nodes[slot.nodeId].containJewelSocket then
 					scale = scale + env.modDB.multipliers["Corrupted" .. item.rarity:gsub("(%a)(%u*)", function(a, b) return a..string.lower(b) end) .. "JewelEffect"]
-					local combinedList = new("ModList")
+					local combinedList = newModList()
 					for _, mod in ipairs(srcList) do
 						combinedList:MergeMod(mod)
 					end	
 					env.itemModDB:ScaleAddList(combinedList, scale)
 				elseif item.type == "Gloves" and calcLib.mod(env.initialNodeModDB, nil, "EffectOfBonusesFromGloves") ~=1 then
 					scale = calcLib.mod(env.initialNodeModDB, nil, "EffectOfBonusesFromGloves") - 1
-					local combinedList = new("ModList")
+					local combinedList = newModList()
 					for _, mod in ipairs(srcList) do
 						combinedList:MergeMod(mod)
 					end
-					local scaledList = new("ModList")
+					local scaledList = newModList()
 					scaledList:ScaleAddList(combinedList, scale)
 					for _, mod in ipairs(scaledList) do
 						combinedList:MergeMod(mod, true)
@@ -1134,11 +1153,11 @@ function calcs.initEnv(build, mode, override, specEnv)
 					env.itemModDB:AddList(combinedList)
 				elseif item.type == "Boots" and calcLib.mod(env.initialNodeModDB, nil, "EffectOfBonusesFromBoots") ~= 1 then
 					scale = calcLib.mod(env.initialNodeModDB, nil, "EffectOfBonusesFromBoots") - 1
-					local combinedList = new("ModList")
+					local combinedList = newModList()
 					for _, mod in ipairs(srcList) do
 						combinedList:MergeMod(mod)
 					end
-					local scaledList = new("ModList")
+					local scaledList = newModList()
 					scaledList:ScaleAddList(combinedList, scale)
 					for _, mod in ipairs(scaledList) do
 						combinedList:MergeMod(mod, true)
@@ -1245,6 +1264,22 @@ function calcs.initEnv(build, mode, override, specEnv)
 	-- Merge env.itemModDB with env.ModDB
 	mergeDB(env.modDB, env.itemModDB)
 
+	-- Record which nodes are affected by radius jewels; buildModListForNode may only
+	-- cache nodes outside this set, as radius jewels evaluate against per-pass state.
+	-- Invalidated alongside nodeModListCache on every build update.
+	if not build.radiusJewelNodeSet and build.nodeModListCache then
+		local radiusNodes = { }
+		for _, rad in pairs(env.radiusJewelList) do
+			for nodeId in pairs(rad.nodes) do
+				radiusNodes[nodeId] = true
+			end
+		end
+		for nodeId in pairs(env.extraRadiusNodeList) do
+			radiusNodes[nodeId] = true
+		end
+		build.radiusJewelNodeSet = radiusNodes
+	end
+
 	-- Add granted passives (e.g., amulet anoints)
 	if not accelerate.nodeAlloc then
 		for _, passive in pairs(env.modDB:List(nil, "GrantedPassive")) do
@@ -1285,7 +1320,7 @@ function calcs.initEnv(build, mode, override, specEnv)
 	end
 	if not override or (override and not override.extraJewelFuncs) then
 		override = override or {}
-		override.extraJewelFuncs = new("ModList")
+		override.extraJewelFuncs = newModList()
 		override.extraJewelFuncs.actor = env.player
 		for _, mod in ipairs(env.modDB:Tabulate("LIST", nil, "ExtraJewelFunc")) do
 			override.extraJewelFuncs:AddMod(mod.mod)

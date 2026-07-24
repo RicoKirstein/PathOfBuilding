@@ -20,6 +20,20 @@ local ModListClass = newClass("ModList", "ModStore", function(self, parent)
 	self.ModStore(parent)
 end)
 
+-- Fast equivalent of new("ModList", parent): bypasses the generic class machinery,
+-- whose per-instance parent proxies and closures dominate the cost of creating the
+-- many short-lived ModLists used during calculations
+function newModList(parent)
+	local list = setmetatable({
+		parent = parent or false,
+		multipliers = { },
+		conditions = { },
+	}, ModListClass)
+	list.Object = list
+	list.actor = parent and parent.actor or { }
+	return list
+end
+
 function ModListClass:AddMod(mod)
 	t_insert(self, mod)
 end
