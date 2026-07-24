@@ -31,8 +31,6 @@ local pool = {
 	frameCounter = 0,
 }
 
-local WORKER_COUNT = 16
-
 -- Sections whose tab Load functions fully replace prior state, making them safe
 -- to re-load into a live worker build (see WorkerScript patch handler); a change
 -- in any other section forces a full build reload
@@ -55,11 +53,22 @@ local function plog(fmt, ...)
 	end
 end
 
+-- Worker count from the Options setting (0 disables the pool)
+function pool:DesiredCount()
+	local count = tonumber(main and main.workerPoolCount) or 16
+	return math.max(0, math.min(32, math.floor(count)))
+end
+
 function pool:Start()
 	if self.started then
 		return
 	end
+	local count = self:DesiredCount()
+	if count == 0 then
+		return
+	end
 	self.started = true
+	self.launchedCount = count
 	self.logPath = GetScriptPath() .. "/../workerpool-timing.log"
 	local lf = io.open(self.logPath, "w")
 	if lf then
@@ -76,7 +85,7 @@ function pool:Start()
 	end
 	local script = scriptFile:read("*a")
 	scriptFile:close()
-	for i = 1, WORKER_COUNT do
+	for i = 1, count do
 		local workerId = self.nextWorkerId
 		self.nextWorkerId = workerId + 1
 		local subId = LaunchSubScript(script, "PoBWorkerPoolRPC", "ConPrintf", workerId, GetScriptPath())
@@ -102,7 +111,42 @@ function pool:IsAvailable()
 			self:Start()
 		end
 	end
-	return self.aliveCount > 0
+	return self.aliveCount > 0 and self:DesiredCount() > 0
+end
+
+-- Applies a changed worker-count option: the current fleet is told to quit
+-- (each worker on its next call-in) and the next availability check starts a
+-- new one with the desired count. Queued jobs survive a resize and are served
+-- by the new fleet; disabling cancels all pending batches so their consumers
+-- fall back to synchronous calculation.
+function pool:ApplySettings()
+	local count = self:DesiredCount()
+	if not self.started or count == self.launchedCount then
+		return
+	end
+	plog("WorkerPool: worker count %d -> %d; restarting fleet", self.launchedCount or 0, count)
+	for _, w in pairs(self.workers) do
+		if w.alive then
+			w.quit = true
+		end
+	end
+	self.started = false
+	if count > 0 then
+		-- Prestart the resized fleet from the frame hook rather than waiting for
+		-- the next consumer
+		self.startRequested = true
+	end
+	if count == 0 then
+		local batches = { }
+		for _, job in pairs(self.jobs) do
+			batches[job.batch] = true
+		end
+		for batch in pairs(batches) do
+			self:CancelBatch(batch)
+		end
+		self.jobs = { }
+		self.jobQueue = { }
+	end
 end
 
 function pool:WorkerDied(workerId)
@@ -315,7 +359,7 @@ end
 -- The single RPC entry point workers block on; must return quickly
 function pool:HandleRPC(workerId, msg, revision, jobId, resultJson)
 	local w = self.workers[workerId]
-	if not w then
+	if not w or w.quit then
 		return "quit"
 	end
 	if msg == "fatal" then
