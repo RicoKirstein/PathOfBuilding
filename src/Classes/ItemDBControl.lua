@@ -240,6 +240,60 @@ function ItemDBClass:ListBuilder()
 		local useFullDPS = self.sortDetail.stat == "FullDPS"
 		local start = GetTime()
 		local calcFunc, calcBase = self.itemsTab.build.calcsTab:GetMiscCalculator(self.build)
+		-- Spread the per-item calculations over the background worker pool when
+		-- available; this coroutine just waits for the merged results
+		local pool = main.workerPool
+		local pooled = false
+		if pool and pool:IsAvailable() then
+			local slots = { }
+			for slotName, slot in pairs(self.itemsTab.slots) do
+				if not slot.inactive and (not slot.weaponSet or slot.weaponSet == (self.itemsTab.activeItemSet.useSecondWeaponSet and 2 or 1)) then
+					t_insert(slots, slotName)
+				end
+			end
+			-- Small shards pipeline better across workers and give progress updates
+			local shardCount = math.max(1, pool.aliveCount * 2)
+			local per = math.max(4, math.ceil(#list / shardCount))
+			shardCount = math.ceil(#list / per)
+			local shards = { }
+			for s = 1, shardCount do
+				local slice = { }
+				local any = false
+				for i = (s - 1) * per + 1, math.min(s * per, #list) do
+					list[i].measuredPower = -math.huge
+					if list[i].raw then
+						slice[tostring(i)] = list[i].raw
+						any = true
+					end
+				end
+				if any then
+					t_insert(shards, { stat = self.sortDetail.stat, statLabel = self.sortDetail.label, slots = slots, items = slice })
+				end
+			end
+			local batchDone = false
+			pool:CancelBatch(self.pendingSortBatch)
+			pooled = pool:SubmitBatch("itemPower", shards, function(results)
+				for key, power in pairs(results) do
+					local item = list[tonumber(key)]
+					if item then
+						item.measuredPower = power
+					end
+				end
+				batchDone = true
+			end, function(done, total)
+				self.defaultText = "^7Sorting... ("..m_floor(done / total * 100).."%)"
+			end, true)
+			self.pendingSortBatch = pooled or nil
+			if pooled then
+				self.defaultText = "^7Sorting... (0%)"
+				while not batchDone do
+					coroutine.yield()
+				end
+			end
+		end
+		if pooled then
+			-- results already merged above
+		else
 		for itemIndex, item in ipairs(list) do
 			item.measuredPower = -math.huge
 			for slotName, slot in pairs(self.itemsTab.slots) do
@@ -255,6 +309,7 @@ function ItemDBClass:ListBuilder()
 				coroutine.yield()
 				start = now
 			end
+		end
 		end
 	end
 

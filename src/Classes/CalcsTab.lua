@@ -497,6 +497,10 @@ function CalcsTabClass:PowerBuilder()
 	-- other stats an explicit false skips its per-skill recalculation for every node
 	local useFullDPS = (self.powerStat and self.powerStat.stat == "FullDPS") or false
 	local calcFunc, calcBase = self:GetMiscCalculator()
+	-- Composes most nodes' outputs from per-modifier deltas instead of running a full
+	-- calculation per node; nodes it cannot compose fall through to the exact path below
+	local aggregate = not self.nodePowerAggregateDisabled and self.calcs.newNodeAggregate(self.build, calcFunc, calcBase, useFullDPS) or nil
+	local aggregateSample = { }
 	local cache = { }
 	local distanceMap = { }
 	local distanceList = { }
@@ -534,14 +538,14 @@ function CalcsTabClass:PowerBuilder()
 		return not assignedNodeId or assignedNodeId == node.id
 	end
 
-	local function calculateAddNodePower(power, distance, node, output, buildPathNodes)
+	local function calculateAddNodePower(power, distance, node, output, getPathOutput)
 		if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
 			power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
 			if node.path and not node.ascendancyName then
 				newPowerMax.singleStat = m_max(newPowerMax.singleStat, power.singleStat)
 				power.pathPower = power.singleStat
 				if distance > 1 then
-					power.pathPower = self:CalculatePowerStat(self.powerStat, calcFunc({ addNodes = buildPathNodes() }, useFullDPS), calcBase)
+					power.pathPower = self:CalculatePowerStat(self.powerStat, getPathOutput(), calcBase)
 				end
 			end
 		elseif not self.powerStat or not self.powerStat.ignoreForNodes then
@@ -556,6 +560,61 @@ function CalcsTabClass:PowerBuilder()
 		end
 	end
 	
+	-- Prefetch the unallocated-node outputs from the worker pool, sharded across
+	-- all workers; the loop below uses them in place of local calculations
+	local pooledOutputs
+	local workerPool = main.workerPool
+	if workerPool and workerPool:IsAvailable() then
+		local ids = { }
+		local extraIds = { }
+		for nodeId, node in pairs(self.build.spec.nodes) do
+			if node.modKey ~= "" and not self.mainEnv.grantedPassives[nodeId] then
+				if node.type == "Mastery" and node.allMasteryOptions then
+					if not (self.nodePowerMaxDepth and self.nodePowerMaxDepth < node.pathDist) then
+						for _, masteryEffect in ipairs(node.masteryEffects or { }) do
+							if masteryEffectCanBeAssignedToNode(node, masteryEffect) then
+								t_insert(extraIds, "m" .. nodeId .. "/" .. masteryEffect.effect)
+							end
+						end
+					end
+				elseif node.alloc then
+					t_insert(extraIds, "r" .. nodeId)
+					if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes and node.depends and #node.depends > 1 then
+						t_insert(extraIds, "p" .. nodeId)
+					end
+				elseif not (self.nodePowerMaxDepth and (node.pathDist or 1000) > self.nodePowerMaxDepth) then
+					t_insert(ids, nodeId)
+				end
+			end
+		end
+		local stats = { "LifeUnreserved", "Life", "Armour", "EnergyShield", "EnergyShieldRecoveryCap", "Evasion", "LifeRegenRecovery", "EnergyShieldRegenRecovery", "CombinedDPS" }
+		if self.powerStat and self.powerStat.stat then
+			t_insert(stats, self.powerStat.stat)
+		end
+		-- Near-first shard order, so results stream in roughly the same order the
+		-- node loop below consumes them
+		table.sort(ids, function(a, b)
+			return (self.build.spec.nodes[a].pathDist or 1000) < (self.build.spec.nodes[b].pathDist or 1000)
+		end)
+		for clusterName, clusterNode in pairs(self.build.spec.tree.clusterNodeMap) do
+			if not clusterNode.alloc and clusterNode.modKey ~= "" and not self.mainEnv.grantedPassives[clusterNode.id] then
+				t_insert(extraIds, "c" .. clusterName)
+			end
+		end
+		for _, id in ipairs(extraIds) do
+			t_insert(ids, id)
+		end
+		local shards = workerPool:ShardList(ids, "nodeIds", { stats = stats, useFullDPS = useFullDPS })
+		-- A rebuild supersedes any still-queued shards from the previous one
+		workerPool:CancelBatch(self.nodePowerPoolBatch)
+		pooledOutputs = workerPool:SubmitBatch("nodePower", shards)
+		self.nodePowerPoolBatch = pooledOutputs or nil
+	end
+
+	-- With the pool doing the heavy work, keep main-thread time slices short so the
+	-- UI stays smooth; the old 100ms budget is only needed for all-local builds
+	local frameBudget = pooledOutputs and 15 or 100
+
 	local start = GetTime()
 	local nodeIndex = 0
 	local total = 0
@@ -611,19 +670,48 @@ function CalcsTabClass:PowerBuilder()
 		for nodeId, node in pairs(nodes) do
 			if not node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[nodeId] then
 				if not cache[node.modKey] then
-					cache[node.modKey] = calcFunc({ addNodes = { [node] = true } }, useFullDPS)
+					-- Wait for the node's shard (already-processed nodes keep drawing);
+					-- only compute locally if the batch ended without it (worker died)
+					local pooled = pooledOutputs and pooledOutputs.results[tostring(nodeId)]
+					while not pooled and pooledOutputs and pooledOutputs.pending > 0 do
+						coroutine.yield()
+						pooled = pooledOutputs.results[tostring(nodeId)]
+					end
+					if pooled then
+						cache[node.modKey] = pooled
+						if aggregate then
+							aggregate:LearnExact(node, pooled, true)
+						end
+					else
+						cache[node.modKey] = calcFunc({ addNodes = { [node] = true } }, useFullDPS)
+						if aggregate then
+							aggregate:LearnExact(node, cache[node.modKey])
+						end
+					end
 				end
 				local output = cache[node.modKey]
 				calculateAddNodePower(node.power, distance, node, output, function()
-					local pathNodes = { }
+					local pathArray = { }
 					for _, pathNode in pairs(node.path) do
+						t_insert(pathArray, pathNode)
+					end
+					local composed = aggregate and aggregate:ComposeNodes(pathArray)
+					if composed then
+						if #aggregateSample < 5 and #pathArray > 2 then
+							t_insert(aggregateSample, { node = node, pathArray = pathArray, composed = composed })
+						end
+						return composed
+					end
+					local pathNodes = { }
+					for _, pathNode in ipairs(pathArray) do
 						pathNodes[pathNode] = true
 					end
-					return pathNodes
+					return calcFunc({ addNodes = pathNodes }, useFullDPS)
 				end)
 			elseif node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[nodeId] then
 				if not cache[node.modKey.."_remove"] then
-					cache[node.modKey.."_remove"] = calcFunc({ removeNodes = { [node] = true } }, useFullDPS)
+					cache[node.modKey.."_remove"] = (pooledOutputs and pooledOutputs.results["r" .. nodeId])
+						or calcFunc({ removeNodes = { [node] = true } }, useFullDPS)
 				end
 				local output = cache[node.modKey.."_remove"]
 				if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
@@ -635,7 +723,8 @@ function CalcsTabClass:PowerBuilder()
 							pathNodes[node] = true
 						end
 						if #node.depends > 1 then
-							node.power.pathPower = self:CalculatePowerStat(self.powerStat, calcFunc({ removeNodes = pathNodes }, useFullDPS), calcBase)
+							local pathOutput = (pooledOutputs and pooledOutputs.results["p" .. nodeId]) or calcFunc({ removeNodes = pathNodes }, useFullDPS)
+							node.power.pathPower = self:CalculatePowerStat(self.powerStat, pathOutput, calcBase)
 						end
 					end
 				end
@@ -652,7 +741,7 @@ function CalcsTabClass:PowerBuilder()
 				end
 			end
 			nodeIndex = nodeIndex + 1
-			if coroutine.running() and GetTime() - start > 100 then
+			if coroutine.running() and GetTime() - start > frameBudget then
 				if self.build.powerBuilderProgressCallback then
 					self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
 				end
@@ -670,21 +759,38 @@ function CalcsTabClass:PowerBuilder()
 					local effectNode = buildMasteryEffectNode(node, effect)
 					if effectNode.modKey ~= "" then
 						if not cache[effectNode.modKey] then
-							cache[effectNode.modKey] = calcFunc({ addNodes = { [effectNode] = true } }, useFullDPS)
+							local pooled = pooledOutputs and pooledOutputs.results["m" .. node.id .. "/" .. effect.id]
+							if pooled then
+								cache[effectNode.modKey] = pooled
+								if aggregate then
+									aggregate:LearnExact(effectNode, pooled, true)
+								end
+							else
+								cache[effectNode.modKey] = calcFunc({ addNodes = { [effectNode] = true } }, useFullDPS)
+								if aggregate then
+									aggregate:LearnExact(effectNode, cache[effectNode.modKey])
+								end
+							end
 						end
 						local output = cache[effectNode.modKey]
 						node.power.masteryEffects[effect.id] = { }
 						local effectPower = node.power.masteryEffects[effect.id]
 						calculateAddNodePower(effectPower, node.pathDist, node, output, function()
-							local pathNodes = {
-								[effectNode] = true
-							}
+							local pathArray = { effectNode }
 							for _, pathNode in pairs(node.path) do
 								if pathNode ~= node then
-									pathNodes[pathNode] = true
+									t_insert(pathArray, pathNode)
 								end
 							end
-							return pathNodes
+							local composed = aggregate and aggregate:ComposeNodes(pathArray)
+							if composed then
+								return composed
+							end
+							local pathNodes = { }
+							for _, pathNode in ipairs(pathArray) do
+								pathNodes[pathNode] = true
+							end
+							return calcFunc({ addNodes = pathNodes }, useFullDPS)
 						end)
 						if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
 							effectPower.pathPower = effectPower.pathPower or effectPower.singleStat
@@ -697,7 +803,7 @@ function CalcsTabClass:PowerBuilder()
 						end
 					end
 					nodeIndex = nodeIndex + 1
-					if coroutine.running() and GetTime() - start > 100 then
+					if coroutine.running() and GetTime() - start > frameBudget then
 						if self.build.powerBuilderProgressCallback then
 							self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
 						end
@@ -718,14 +824,15 @@ function CalcsTabClass:PowerBuilder()
 		wipeTable(node.power)
 		if not node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[node.id] then
 			if not cache[node.modKey] then
-				cache[node.modKey] = calcFunc({ addNodes = { [node] = true } }, useFullDPS)
+				cache[node.modKey] = (pooledOutputs and pooledOutputs.results["c" .. nodeName])
+					or calcFunc({ addNodes = { [node] = true } }, useFullDPS)
 			end
 			local output = cache[node.modKey]
 			if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
 				node.power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
 			end
 			nodeIndex = nodeIndex + 1
-			if coroutine.running() and GetTime() - start > 100 then
+			if coroutine.running() and GetTime() - start > frameBudget then
 				if self.build.powerBuilderProgressCallback then
 					self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
 				end
@@ -734,6 +841,33 @@ function CalcsTabClass:PowerBuilder()
 			end
 		end
 	end
+	-- Aggregate guardrail: recalculate a small sample of composed paths exactly and
+	-- record the worst deviation, so a composition problem shows up in diagnostics
+	-- instead of silently mis-colouring the heat map
+	if aggregate then
+		local worst = 0
+		for _, sample in ipairs(aggregateSample) do
+			local pathNodes = { }
+			for _, pathNode in ipairs(sample.pathArray) do
+				pathNodes[pathNode] = true
+			end
+			local exactOutput = calcFunc({ addNodes = pathNodes }, useFullDPS)
+			if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
+				local exactStat = self:CalculatePowerStat(self.powerStat, exactOutput, calcBase)
+				local composedStat = self:CalculatePowerStat(self.powerStat, sample.composed, calcBase)
+				worst = m_max(worst, math.abs(exactStat - composedStat) / m_max(newPowerMax.singleStat, 1e-9))
+			end
+		end
+		self.nodePowerAggregateInfo = {
+			derivations = aggregate.derivations,
+			composed = aggregate.composedCount,
+			sampleWorstError = worst,
+		}
+		if launch.devMode then
+			ConPrintf("Node aggregate: %d composed, %d derivations, sample worst path error %.4f%%", aggregate.composedCount, aggregate.derivations, worst * 100)
+		end
+	end
+
 	self.powerMax = newPowerMax
 	self.powerBuilderInitialized = true
 	-- ConPrintf("Power Build time: %d ms", GetTime() - timer_start)

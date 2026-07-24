@@ -59,6 +59,15 @@ function main:Init()
 	self.modes["LIST"] = LoadModule("Modules/BuildList")
 	self.modes["BUILD"] = LoadModule("Modules/Build")
 
+	-- Background calculation workers; started lazily on first use (a stubbed
+	-- LaunchSubScript, e.g. headless, leaves the pool permanently unavailable)
+	if not POB_IS_WORKER then
+		self.workerPool = LoadModule("Modules/WorkerPool")
+		-- Prestart from the first frame (main state), so workers are warm before
+		-- the first sort instead of adding their spin-up to it
+		self.workerPool.startRequested = true
+	end
+
 	self.popups = { }
 	self.sharedItemList = { }
 	self.sharedItemSetList = { }
@@ -341,6 +350,10 @@ end
 
 function main:OnFrame()
 	self.screenW, self.screenH = GetVirtualScreenSize()
+
+	if self.workerPool then
+		self.workerPool:OnFrame()
+	end
 
 	if self.screenH > self.screenW then
 		self.portraitMode = true

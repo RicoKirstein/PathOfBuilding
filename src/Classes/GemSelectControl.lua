@@ -340,21 +340,99 @@ function GemSelectClass:UpdateSortCache()
 	-- Check for nil because some fields may not be populated, default to 0
 	local baseDPS = (dpsField == "FullDPS" and calcBase[dpsField] ~= nil and calcBase[dpsField]) or (calcBase.Minion and calcBase.Minion.CombinedDPS) or (calcBase[dpsField] ~= nil and calcBase[dpsField]) or 0
 
-	for gemId, gemData in pairs(self.gems) do
-		sortCache.dps[gemId] = baseDPS
-		-- Ignore gems that don't support the active skill
-		if sortCache.canSupport[gemId] or (gemData.grantedEffect.hasGlobalEffect and not gemData.grantedEffect.support) then
-			local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
-			-- Check for nil because some fields may not be populated, default to 0
-			sortCache.dps[gemId] = (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
-		end
-		-- Color based on the DPS
+	local function applyDpsColor(gemId)
 		if sortCache.dps[gemId] > baseDPS then
 			sortCache.dpsColor[gemId] = "^x228866"
 		elseif sortCache.dps[gemId] < baseDPS then
 			sortCache.dpsColor[gemId] = "^xFF4422"
 		else
 			sortCache.dpsColor[gemId] = "^xFFFF66"
+		end
+	end
+
+	-- Evaluating a candidate gem requires a full calculation pass, so spread the
+	-- candidates over the background worker pool when it is available; the list
+	-- shows up immediately and re-sorts when the results arrive
+	local pool = main.workerPool
+	local groupIndex
+	if pool and not self.imbuedSelect and self.skillsTab.sortGemsByDPS then
+		for i, group in ipairs(self.skillsTab.socketGroupList) do
+			if group == self.skillsTab.displayGroup then
+				groupIndex = i
+				break
+			end
+		end
+	end
+	if groupIndex and pool:IsAvailable() then
+		local gemIds = { }
+		for gemId, gemData in pairs(self.gems) do
+			sortCache.dps[gemId] = baseDPS
+			applyDpsColor(gemId)
+			if sortCache.canSupport[gemId] or (gemData.grantedEffect.hasGlobalEffect and not gemData.grantedEffect.support) then
+				t_insert(gemIds, gemId)
+			end
+		end
+		local shards = pool:ShardList(gemIds, "gemIds", {
+			groupIndex = groupIndex,
+			gemIndex = self.index,
+			dpsField = dpsField,
+			defaultLevel = self.skillsTab.defaultGemLevel,
+			defaultQuality = self.skillsTab.defaultGemQuality,
+		})
+		-- The sort cache gets rebuilt liberally (any validity field changing); an
+		-- identical request already in flight must be reused, not cancelled and
+		-- resubmitted, or the batch never lives long enough to finish
+		local sig = groupIndex .. "/" .. self.index .. "/" .. tostring(dpsField) .. "/" .. #gemIds
+		if self.pendingGemBatch and self.pendingGemSig == sig and not self.pendingGemBatch.cancelled then
+			sortCache.pendingDps = self.pendingGemBatch
+		else
+			pool:CancelBatch(self.pendingGemBatch)
+			local function applyResults(results, final)
+				local cache = self.sortCache
+				if not cache then
+					return
+				end
+				for gemId, dps in pairs(results) do
+					if cache.dps[gemId] then
+						cache.dps[gemId] = dps
+						if dps > baseDPS then
+							cache.dpsColor[gemId] = "^x228866"
+						elseif dps < baseDPS then
+							cache.dpsColor[gemId] = "^xFF4422"
+						else
+							cache.dpsColor[gemId] = "^xFFFF66"
+						end
+					end
+				end
+				if final then
+					cache.pendingDps = nil
+				end
+				self:SortGemList(self.list)
+			end
+			sortCache.pendingDps = pool:SubmitBatch("gemDps", shards, function(results)
+				self.pendingGemBatch = nil
+				applyResults(results, true)
+			end, function(done, total)
+				-- Stream partial results in so the visible list improves while the
+				-- rest are still computing
+				if self.pendingGemBatch and done % 4 == 0 then
+					applyResults(self.pendingGemBatch.results)
+				end
+			end, true)
+			self.pendingGemBatch = sortCache.pendingDps or nil
+			self.pendingGemSig = sig
+		end
+	end
+	if not sortCache.pendingDps then
+		for gemId, gemData in pairs(self.gems) do
+			sortCache.dps[gemId] = baseDPS
+			-- Ignore gems that don't support the active skill
+			if sortCache.canSupport[gemId] or (gemData.grantedEffect.hasGlobalEffect and not gemData.grantedEffect.support) then
+				local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
+				-- Check for nil because some fields may not be populated, default to 0
+				sortCache.dps[gemId] = (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
+			end
+			applyDpsColor(gemId)
 		end
 	end
 

@@ -19,6 +19,7 @@ LoadModule("Modules/CalcDefence", calcs)
 LoadModule("Modules/CalcOffence", calcs)
 LoadModule("Modules/CalcTriggers", calcs)
 LoadModule("Modules/CalcMirages.lua", calcs)
+LoadModule("Modules/CalcNodeAggregate", calcs)
 
 -- Get the average value of a table -- note this is unused
 function math.average(t)
