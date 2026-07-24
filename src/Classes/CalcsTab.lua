@@ -604,7 +604,11 @@ function CalcsTabClass:PowerBuilder()
 		for _, id in ipairs(extraIds) do
 			t_insert(ids, id)
 		end
-		local shards = workerPool:ShardList(ids, "nodeIds", { stats = stats, useFullDPS = useFullDPS })
+		-- Small shards: a single node evaluation can run over a second on heavy
+		-- FullDPS builds, and a queued interactive batch (gem/item sort) can only
+		-- start once a worker finishes its current shard. The default sharding can
+		-- produce one fat shard per worker, pinning the whole pool for its duration.
+		local shards = workerPool:ShardList(ids, "nodeIds", { stats = stats, useFullDPS = useFullDPS }, 2)
 		-- A rebuild supersedes any still-queued shards from the previous one
 		workerPool:CancelBatch(self.nodePowerPoolBatch)
 		pooledOutputs = workerPool:SubmitBatch("nodePower", shards)

@@ -251,10 +251,11 @@ function ItemDBClass:ListBuilder()
 					t_insert(slots, slotName)
 				end
 			end
-			-- Small shards pipeline better across workers and give progress updates
-			local shardCount = math.max(1, pool.aliveCount * 2)
-			local per = math.max(4, math.ceil(#list / shardCount))
-			shardCount = math.ceil(#list / per)
+			-- Small fixed shards: they pipeline better across workers, give progress
+			-- updates, and bound how long anything queued behind them waits for a
+			-- worker; item evaluations can run hundreds of ms each
+			local per = 4
+			local shardCount = math.ceil(#list / per)
 			local shards = { }
 			for s = 1, shardCount do
 				local slice = { }
