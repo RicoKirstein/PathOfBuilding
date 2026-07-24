@@ -595,6 +595,10 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 	self.latestTree = main.tree[latestTreeVersion]
 	data.setJewelRadiiGlobally(latestTreeVersion)
 	self.data = data
+	-- Tab creation and section loading below trigger many redundant full
+	-- depends/paths rebuilds (one per spec, jewel socket and class-selection
+	-- step); defer them all into a single rebuild before the first calculation
+	self.deferSpecRebuild = true
 	self.importTab = new("ImportTab", self)
 	self.notesTab = new("NotesTab", self)
 	self.partyTab = new("PartyTab", self)
@@ -645,6 +649,7 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 				t_insert(deferredPassiveTrees, node)
 			else
 				if saver:Load(node, self.dbFileName) then
+					self.deferSpecRebuild = nil
 					self:CloseBuild()
 					return
 				end
@@ -654,6 +659,7 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 	for _, node in ipairs(deferredPassiveTrees) do
 		-- Check if there is a saver that can load this section
 		if self.treeTab:Load(node, self.dbFileName) then
+			self.deferSpecRebuild = nil
 			self:CloseBuild()
 			return
 		end
@@ -662,6 +668,10 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 		if saver.PostLoad then
 			saver:PostLoad()
 		end
+	end
+	self.deferSpecRebuild = nil
+	if self.spec and self.spec.rebuildPending then
+		self.spec:BuildAllDependsAndPaths()
 	end
 
 	if next(self.configTab.input) == nil then

@@ -1096,6 +1096,14 @@ end
 
 -- Rebuilds dependencies and paths for all nodes
 function PassiveSpecClass:BuildAllDependsAndPaths()
+	-- Loading a build triggers a full rebuild for every spec, jewel socket and
+	-- class-selection step; Build:Init sets deferSpecRebuild to collapse them into
+	-- one rebuild of the active spec, and specs left pending rebuild on activation
+	if self.build and self.build.deferSpecRebuild then
+		self.rebuildPending = true
+		return
+	end
+	self.rebuildPending = nil
 	-- This table will keep track of which nodes have been visited during each path-finding attempt
 	local visited = { }
 	local attributes = { "Dexterity", "Intelligence", "Strength" }
