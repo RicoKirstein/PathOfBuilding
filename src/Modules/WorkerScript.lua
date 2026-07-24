@@ -242,6 +242,61 @@ while true do
 			PoBWorkerPoolRPC(workerId, "fatal", revision, nil, "build sync failed: " .. tostring(errLoad))
 			return "failed"
 		end
+	elseif cmd == "patch" then
+		-- Incremental sync: re-load only the changed build sections into the live
+		-- build, then refresh the caches and calculators that jobs read. Far
+		-- cheaper than a full build reload; any failure falls back to one.
+		local okPatch, errPatch = pcall(function()
+			-- The patch document arrives in the same argument slot as the full
+			-- build XML of a "sync" command
+			local doc, parseErr = common.xml.ParseXML(b)
+			local root = doc and doc[1]
+			if not root then
+				error("patch parse failed: " .. tostring(parseErr))
+			end
+			-- Collapse any depends/paths rebuilds the section loads trigger into one
+			build.deferSpecRebuild = true
+			local loaded = { }
+			for _, node in ipairs(root) do
+				if type(node) == "table" and node.elem then
+					local saver = build.savers[node.elem]
+					if not saver then
+						error("no saver for section " .. node.elem)
+					end
+					if saver:Load(node, build.dbFileName) then
+						error("saver rejected section " .. node.elem)
+					end
+					loaded[#loaded + 1] = saver
+				end
+			end
+			for _, saver in ipairs(loaded) do
+				if saver.PostLoad then
+					saver:PostLoad()
+				end
+			end
+			build.deferSpecRebuild = nil
+			if build.spec and build.spec.rebuildPending then
+				build.spec:BuildAllDependsAndPaths()
+			end
+			wipeGlobalCache()
+			build.outputRevision = (build.outputRevision or 1) + 1
+			build.buildFlag = false
+			-- Job handlers only use the misc calculator; refresh it (one base pass)
+			-- instead of the several passes a full BuildOutput would run. The node
+			-- calculator is emptied rather than refreshed so accidental use by a
+			-- future handler fails loudly instead of computing on stale state.
+			local calcs = build.calcsTab.calcs
+			build.calcsTab.miscCalculator = { calcs.getMiscCalculator(build) }
+			build.calcsTab.nodeCalculator = { }
+		end)
+		if okPatch then
+			revision = a
+		else
+			build.deferSpecRebuild = nil
+			-- Response intentionally ignored; the next "ready" round trip will be
+			-- answered with a full sync
+			PoBWorkerPoolRPC(workerId, "patchfail", revision, nil, tostring(errPatch))
+		end
 	elseif cmd == "job" then
 		local okJob, result = pcall(function()
 			local payload = dkjson.decode(c)

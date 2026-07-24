@@ -372,13 +372,15 @@ function GemSelectClass:UpdateSortCache()
 				t_insert(gemIds, gemId)
 			end
 		end
+		-- Tiny shards: a FullDPS gem evaluation can run into hundreds of ms, and the
+		-- visible list only starts improving once the first shards return
 		local shards = pool:ShardList(gemIds, "gemIds", {
 			groupIndex = groupIndex,
 			gemIndex = self.index,
 			dpsField = dpsField,
 			defaultLevel = self.skillsTab.defaultGemLevel,
 			defaultQuality = self.skillsTab.defaultGemQuality,
-		})
+		}, 2)
 		-- The sort cache gets rebuilt liberally (any validity field changing); an
 		-- identical request already in flight must be reused, not cancelled and
 		-- resubmitted, or the batch never lives long enough to finish
@@ -414,8 +416,8 @@ function GemSelectClass:UpdateSortCache()
 				applyResults(results, true)
 			end, function(done, total)
 				-- Stream partial results in so the visible list improves while the
-				-- rest are still computing
-				if self.pendingGemBatch and done % 4 == 0 then
+				-- rest are still computing; the very first arrival re-sorts immediately
+				if self.pendingGemBatch and (done == 1 or done % 4 == 0) then
 					applyResults(self.pendingGemBatch.results)
 				end
 			end, true)

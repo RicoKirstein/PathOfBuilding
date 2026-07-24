@@ -1143,6 +1143,10 @@ holding Shift will put it in the second.]])
 end)
 
 function ItemsTabClass:Load(xml, dbFileName)
+	-- Wipe item state so loading fully replaces it: worker builds re-load this
+	-- section in place when it changes (see WorkerScript patch handler)
+	self.items = { }
+	wipeTable(self.itemOrderList)
 	self.activeItemSetId = 0
 	self.itemSets = { }
 	self.itemSetOrderList = { }

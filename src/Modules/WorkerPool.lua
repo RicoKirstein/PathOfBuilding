@@ -33,9 +33,25 @@ local pool = {
 
 local WORKER_COUNT = 16
 
+-- Sections whose tab Load functions fully replace prior state, making them safe
+-- to re-load into a live worker build (see WorkerScript patch handler); a change
+-- in any other section forces a full build reload
+local PATCHABLE_SECTIONS = { Skills = true, Items = true, Config = true }
+
 local function plog(fmt, ...)
+	local line = string.format("[%7d] ", GetTime()) .. string.format(fmt, ...)
 	if launch.devMode then
-		ConPrintf(fmt, ...)
+		ConPrintf("%s", line)
+	end
+	-- Also append to a timing log next to the repo so post-hoc analysis does not
+	-- depend on a console being open; truncated on every pool start
+	if not pool.logPath then
+		pool.logPath = GetScriptPath() .. "/../workerpool-timing.log"
+	end
+	local lf = io.open(pool.logPath, "a")
+	if lf then
+		lf:write(line, "\n")
+		lf:close()
 	end
 end
 
@@ -44,6 +60,11 @@ function pool:Start()
 		return
 	end
 	self.started = true
+	self.logPath = GetScriptPath() .. "/../workerpool-timing.log"
+	local lf = io.open(self.logPath, "w")
+	if lf then
+		lf:close()
+	end
 	-- Worker ids must be unique across script restarts (F5): workers from a previous
 	-- state survive in the host, and colliding ids would let them impersonate the
 	-- new fleet; unknown ids are told to quit on their first call
@@ -120,11 +141,121 @@ function pool:OnFrame()
 end
 
 function pool:GetBuildXml(build)
-	if self.buildXmlCache.revision ~= build.outputRevision then
-		self.buildXmlCache.revision = build.outputRevision
-		self.buildXmlCache.text = build:SaveDB("worker sync")
+	local cache = self.buildXmlCache
+	local fresh
+	if build.buildFlag then
+		-- An edit is pending recalculation. Serialize the new input state NOW:
+		-- the host answers worker RPCs (SubScriptFrame) before OnFrame runs the
+		-- potentially long main-thread recalculation, so workers can resync and
+		-- reload in parallel with it instead of serially after it. SaveDB only
+		-- reads input state, which is already final when buildFlag is set.
+		if cache.dirtyFrame ~= self.frameCounter then
+			cache.dirtyFrame = self.frameCounter
+			cache.revision = nil -- re-key once the recalc assigns the new revision
+			fresh = true
+		end
+	elseif cache.revision ~= build.outputRevision then
+		cache.revision = build.outputRevision
+		fresh = true
 	end
-	return self.buildXmlCache.text
+	if fresh then
+		local t0 = GetTime()
+		local text = build:SaveDB("worker sync")
+		if text then
+			-- The Build section embeds display stats from the last calculation
+			-- (PlayerStat/MinionStat/FullDPSSkill). They are output, not input: the
+			-- pre-recalc and post-recalc serializations of the same edit differ only
+			-- here, and leaving them in would resync every worker twice per edit.
+			-- Workers recalculate everything anyway and never read these.
+			text = text:gsub("%s*<PlayerStat[^>]*/>", ""):gsub("%s*<MinionStat[^>]*/>", ""):gsub("%s*<FullDPSSkill[^>]*/>", "")
+		end
+		if text and text ~= cache.text then
+			self.lastContentChange = GetTime()
+			cache.sections = self:SplitSections(text)
+			cache.patchCache = { }
+			plog("WorkerPool: build content changed (%d bytes, SaveDB %dms)", #text, GetTime() - t0)
+		end
+		cache.text = text
+	end
+	return cache.text
+end
+
+-- Splits a serialized build into its top-level sections, each with its composed
+-- text as a change fingerprint; returns nil if the document can't be keyed by
+-- section name (which just disables patching, not syncing)
+function pool:SplitSections(text)
+	local ok, doc = pcall(common.xml.ParseXML, text)
+	local root = ok and doc and doc[1]
+	if not root or root.elem ~= "PathOfBuilding" then
+		return nil
+	end
+	local sections = { }
+	for _, node in ipairs(root) do
+		if type(node) == "table" and node.elem then
+			if sections[node.elem] then
+				return nil
+			end
+			sections[node.elem] = { node = node, text = common.xml.ComposeXML(node) }
+		end
+	end
+	return sections
+end
+
+-- Builds the minimal patch that takes a worker from its synced state to the
+-- current build: the changed sections only. Returns nil when a full sync is
+-- needed (unknown prior state, non-patchable section changed, sections
+-- added/removed). Cached per prior state; false marks "not patchable".
+function pool:BuildPatch(w, xmlText)
+	local cache = self.buildXmlCache
+	if not cache.sections or not w.syncedSections or not w.syncedText then
+		return nil
+	end
+	local cached = cache.patchCache[w.syncedText]
+	if cached ~= nil then
+		return cached or nil
+	end
+	local root = { elem = "PathOfBuilding" }
+	local names = { }
+	local patchable = true
+	for name, sec in pairs(cache.sections) do
+		local prev = w.syncedSections[name]
+		if not prev then
+			patchable = false
+			break
+		elseif prev.text ~= sec.text then
+			if not PATCHABLE_SECTIONS[name] then
+				patchable = false
+				break
+			end
+			t_insert(root, sec.node)
+			t_insert(names, name)
+		end
+	end
+	if patchable then
+		for name in pairs(w.syncedSections) do
+			if not cache.sections[name] then
+				patchable = false
+				break
+			end
+		end
+	end
+	local patch = false
+	if patchable and names[1] then
+		local text = common.xml.ComposeXML(root)
+		if text then
+			patch = { text = text, names = table.concat(names, ",") }
+		end
+	end
+	cache.patchCache[w.syncedText] = patch
+	return patch or nil
+end
+
+-- Called from Build:OnFrame around the main-thread recalculation so the stall
+-- shows up in the timing log next to the sync/batch events
+function pool:LogMainRecalc(ms)
+	if self.started then
+		plog("WorkerPool: main-thread recalc took %dms", ms)
+	end
 end
 
 -- Drop a batch's queued jobs and ignore its in-flight results; used when the
@@ -134,6 +265,8 @@ function pool:CancelBatch(batch)
 		return
 	end
 	batch.cancelled = true
+	plog("WorkerPool: batch %s: cancelled %dms after submit (%d of %d shards pending)",
+		tostring(batch.kind), GetTime() - (batch.submitAt or GetTime()), batch.pending, batch.total)
 	for i = #self.jobQueue, 1, -1 do
 		if self.jobQueue[i].batch == batch then
 			self.jobs[self.jobQueue[i].id] = nil
@@ -152,6 +285,10 @@ function pool:CompleteJob(jobId, resultJson)
 		return
 	end
 	local batch = job.batch
+	if not batch.firstResultAt then
+		batch.firstResultAt = GetTime()
+		plog("WorkerPool: batch %s: first result +%dms after submit", tostring(batch.kind), batch.firstResultAt - batch.submitAt)
+	end
 	local result = resultJson and dkjson.decode(resultJson) or { }
 	if result.workerError then
 		plog("WorkerPool: %s", result.workerError)
@@ -161,6 +298,9 @@ function pool:CompleteJob(jobId, resultJson)
 		end
 	end
 	batch.pending = batch.pending - 1
+	if batch.pending == 0 then
+		plog("WorkerPool: batch %s: complete in %dms (%d shards)", tostring(batch.kind), GetTime() - batch.submitAt, batch.total)
+	end
 	if batch.onProgress then
 		PCall(batch.onProgress, batch.total - batch.pending, batch.total)
 	end
@@ -183,6 +323,15 @@ function pool:HandleRPC(workerId, msg, revision, jobId, resultJson)
 		self:WorkerDied(workerId)
 		return "quit"
 	end
+	if msg == "patchfail" then
+		-- Incremental patch didn't apply; forget the worker's state so the next
+		-- round trip falls back to a full sync
+		plog("WorkerPool: worker %d patch failed (%s); falling back to full sync", workerId, tostring(resultJson))
+		w.syncedText = nil
+		w.syncedSections = nil
+		w.syncSentAt = nil
+		return "wait"
+	end
 	if jobId then
 		w.currentJob = nil
 		self:CompleteJob(jobId, resultJson)
@@ -204,15 +353,36 @@ function pool:HandleRPC(workerId, msg, revision, jobId, resultJson)
 	end
 	if w.syncedText ~= xmlText then
 		-- Proactive: idle workers resync as soon as the build content changes, so
-		-- batches submitted later start on warm workers
+		-- batches submitted later start on warm workers. Workers on a known state
+		-- get just the changed sections; anything else gets the full build.
+		local patch = self:BuildPatch(w, xmlText)
 		w.syncedText = xmlText
-		plog("WorkerPool: sync -> worker %d (%d bytes)", workerId, #xmlText)
+		w.syncedSections = self.buildXmlCache.sections
+		w.syncSentAt = GetTime()
+		if patch then
+			plog("WorkerPool: patch -> worker %d (%d bytes: %s%s)", workerId, #patch.text, patch.names,
+				self.lastContentChange and string.format(", +%dms after change", GetTime() - self.lastContentChange) or "")
+			return "patch", build.outputRevision, patch.text
+		end
+		plog("WorkerPool: sync -> worker %d (%d bytes%s)", workerId, #xmlText,
+			self.lastContentChange and string.format(", +%dms after change", GetTime() - self.lastContentChange) or "")
 		return "sync", build.outputRevision, xmlText
+	end
+	if w.syncSentAt then
+		-- This is the worker's first call-in after reloading the synced build
+		plog("WorkerPool: worker %d resynced in %dms%s", workerId, GetTime() - w.syncSentAt,
+			self.lastContentChange and string.format(" (+%dms after change)", GetTime() - self.lastContentChange) or "")
+		w.syncSentAt = nil
 	end
 	if not self.jobQueue[1] then
 		return "wait"
 	end
 	local job = t_remove(self.jobQueue, 1)
+	if not job.batch.firstDispatchAt then
+		job.batch.firstDispatchAt = GetTime()
+		plog("WorkerPool: batch %s: first job dispatched +%dms after submit (worker %d)",
+			tostring(job.batch.kind), job.batch.firstDispatchAt - job.batch.submitAt, workerId)
+	end
 	w.currentJob = job.id
 	return "job", job.id, job.kind, job.payloadJson
 end
@@ -223,12 +393,20 @@ end
 
 -- Splits `list` into per-worker shards, each sharing the fields of `common`
 -- with the shard's slice stored under `listField`
-function pool:ShardList(list, listField, common)
+-- shardSize (optional) fixes the per-shard item count: interactive batches with
+-- expensive items (FullDPS gem swaps) want tiny shards so first results arrive
+-- fast; each shard costs ~a frame of RPC latency, so don't go below ~2
+function pool:ShardList(list, listField, common, shardSize)
 	-- Several small shards per worker: smoother result streaming and better load
 	-- balancing than one big shard each, without drowning in per-shard overhead
 	-- Shards must stay small: a queued priority job can only start once a worker
 	-- finishes its current shard, so shard size bounds interactive latency
-	local shardCount = math.max(1, math.min(self.aliveCount * 8, math.ceil(#list / 8)))
+	local shardCount
+	if shardSize then
+		shardCount = math.max(1, math.ceil(#list / shardSize))
+	else
+		shardCount = math.max(1, math.min(self.aliveCount * 8, math.ceil(#list / 8)))
+	end
 	local shards = { }
 	local per = math.ceil(#list / shardCount)
 	for s = 1, shardCount do
@@ -257,7 +435,11 @@ function pool:SubmitBatch(kind, shards, onComplete, onProgress, priority)
 	if not self:IsAvailable() then
 		return false
 	end
-	local batch = { pending = 0, total = #shards, results = { }, onComplete = onComplete, onProgress = onProgress }
+	local batch = { pending = 0, total = #shards, results = { }, onComplete = onComplete, onProgress = onProgress,
+		kind = kind, submitAt = GetTime() }
+	plog("WorkerPool: batch %s: %d shards submitted%s%s", kind, #shards,
+		priority and " (priority)" or "",
+		self.lastContentChange and string.format(", +%dms after change", GetTime() - self.lastContentChange) or "")
 	for _, payload in ipairs(shards) do
 		local job = {
 			id = self.nextJobId,

@@ -1250,8 +1250,12 @@ function buildMode:OnFrame(inputEvents)
 		-- Rebuild calculation output tables
 		self.outputRevision = self.outputRevision + 1
 		self.buildFlag = false
+		local recalcStart = GetTime()
 		self.calcsTab:BuildOutput()
 		self:RefreshStatList()
+		if main.workerPool then
+			main.workerPool:LogMainRecalc(GetTime() - recalcStart)
+		end
 	end
 	if main.showThousandsSeparators ~= self.lastShowThousandsSeparators then
 		self:RefreshStatList()
