@@ -64,6 +64,20 @@ describe("WorkerPool", function()
 		runCallback("OnFrame")
 	end
 
+	-- A gem dropdown standing on the currently displayed socket group, so the
+	-- specs can call the control's real methods without a UI
+	local function gemSelectStub(gemIndex)
+		return setmetatable({ skillsTab = build.skillsTab, index = gemIndex }, { __index = common.classes.GemSelectControl })
+	end
+
+	local function addEmptySocketGroup()
+		local group = { label = "", enabled = true, gemList = { } }
+		table.insert(build.skillsTab.socketGroupList, group)
+		build.buildFlag = true
+		runCallback("OnFrame")
+		return group
+	end
+
 	local function addRing(mod)
 		build.itemsTab:CreateDisplayItemFromRaw("New Item\nCoral Ring\n" .. mod)
 		build.itemsTab:AddDisplayItem()
@@ -211,10 +225,10 @@ describe("WorkerPool", function()
 			-- Interactive truth: the dropdown's own calculation, run through the
 			-- real control method with the extraction from BuildSortCache
 			local calcFunc = build.calcsTab:GetMiscCalculator()
-			local uiControl = { skillsTab = build.skillsTab, index = gemIndex }
+			local uiControl = gemSelectStub(gemIndex)
 			local expected = { }
 			for _, gemId in ipairs(candidates) do
-				local output = common.classes.GemSelectControl.CalcOutputWithThisGem(uiControl, calcFunc, build.data.gems[gemId], false)
+				local output = uiControl:CalcOutputWithThisGem(calcFunc, build.data.gems[gemId], false)
 				expected[gemId] = (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
 			end
 			local results = workerJobs.handlers.gemDps({
@@ -249,8 +263,7 @@ describe("WorkerPool", function()
 				end
 			end
 			local calcFunc = build.calcsTab:GetMiscCalculator()
-			local uiControl = { skillsTab = build.skillsTab, index = 1 }
-			local output = common.classes.GemSelectControl.CalcOutputWithThisGem(uiControl, calcFunc, build.data.gems[candidate], false)
+			local output = gemSelectStub(1):CalcOutputWithThisGem(calcFunc, build.data.gems[candidate], false)
 			local expected = build.skillsTab.ExtractGemDps(output, "CombinedDPS")
 			local results = workerJobs.handlers.gemDps({
 				groupIndex = 1,
@@ -262,6 +275,68 @@ describe("WorkerPool", function()
 			})
 			assert.is_nil(results.workerError)
 			assert.are.equal(expected, results[candidate])
+		end)
+
+		it("gemDps ranks by the group's own skill when ownGroup is set", function()
+			-- Planning a new socket group: candidates for its empty slot cannot move
+			-- the main skill's DPS, so they only separate when each is measured as
+			-- the skill of the group it is being dropped into
+			addSocketGroup()
+			local newGroup = addEmptySocketGroup()
+			build.mainSocketGroup = 1
+			build.skillsTab.displayGroup = newGroup
+			local wanted = { Fireball = true, Spark = true, Frostbolt = true }
+			local candidates = { }
+			for gemId, gemData in pairs(build.data.gems) do
+				if gemData.grantedEffect and wanted[gemData.name] then
+					table.insert(candidates, gemId)
+				end
+			end
+			table.sort(candidates)
+			assert.are.equal(3, #candidates)
+
+			local payload = {
+				groupIndex = 2,
+				gemIndex = 1,
+				dpsField = "CombinedDPS",
+				defaultLevel = build.skillsTab.defaultGemLevel,
+				defaultQuality = build.skillsTab.defaultGemQuality,
+				gemIds = candidates,
+			}
+			local mainSkillResults = workerJobs.handlers.gemDps(payload)
+			assert.is_nil(mainSkillResults.workerError)
+			payload.ownGroup = true
+			local ownResults = workerJobs.handlers.gemDps(payload)
+			assert.is_nil(ownResults.workerError)
+
+			-- Against the main skill every candidate scores the same, which is what
+			-- makes the ordering useless for an empty group
+			for _, gemId in ipairs(candidates) do
+				assert.are.equal(mainSkillResults[candidates[1]], mainSkillResults[gemId], "gem " .. gemId)
+			end
+			local distinct = { }
+			for _, gemId in ipairs(candidates) do
+				assert.is_true(ownResults[gemId] > 0, "gem " .. gemId .. " has no DPS of its own")
+				distinct[ownResults[gemId]] = true
+			end
+			local distinctCount = 0
+			for _ in pairs(distinct) do
+				distinctCount = distinctCount + 1
+			end
+			assert.are.equal(3, distinctCount)
+
+			-- Interactive truth: the dropdown ranking the same slot with the option on
+			build.skillsTab.sortGemsByOwnDPS = true
+			local calcFunc = build.calcsTab:GetMiscCalculator()
+			local uiControl = gemSelectStub(1)
+			assert.are.equal(2, uiControl:GetOwnDPSGroupIndex())
+			for _, gemId in ipairs(candidates) do
+				local output = uiControl:CalcOutputWithThisGem(calcFunc, build.data.gems[gemId], false)
+				assert.are.equal(build.skillsTab.ExtractGemDps(output, "CombinedDPS"), ownResults[gemId], "gem " .. gemId)
+			end
+			-- The measurement must not leave the build pointing at another skill
+			assert.are.equal(1, build.mainSocketGroup)
+			assert.are.equal(0, #newGroup.gemList)
 		end)
 
 		it("itemPower matches the ItemDBControl sort", function()
@@ -280,7 +355,24 @@ describe("WorkerPool", function()
 			-- Interactive truth: the item DB list builder's synchronous path (the
 			-- pool is unavailable under busted)
 			local control = new("ItemDBControl", nil, { 0, 0, 100, 100 }, build.itemsTab, { list = items }, "RARE")
-			control.sortDetail = statEntry
+			-- Sort by a dropdown entry as BuildSortOrder builds it, not by the raw
+			-- data.powerStatList entry: the two are not interchangeable, because the
+			-- dropdown's `label` carries a "Sort by " prefix for display and so cannot
+			-- be what a worker matches against data.powerStatList. Assigning the raw
+			-- entry here is what let that mismatch go unnoticed.
+			-- (The sort dropdown control itself only exists for dbType "UNIQUE", so
+			-- drive BuildSortOrder directly and pick the entry rather than selecting it.)
+			control:BuildSortOrder()
+			local sortOption
+			for _, option in ipairs(control.sortDropList) do
+				if option.stat == statEntry.stat and option.statLabel == statEntry.label then
+					sortOption = option
+					break
+				end
+			end
+			assert.is_not_nil(sortOption)
+			assert.are.equal("Sort by " .. statEntry.label, sortOption.label)
+			control.sortDetail = sortOption
 			control.sortOrder = { control.sortControl.STAT, control.sortControl.NAME }
 			control:ListBuilder()
 			local slots = { }
@@ -290,14 +382,38 @@ describe("WorkerPool", function()
 				end
 			end
 			local results = workerJobs.handlers.itemPower({
-				stat = statEntry.stat,
-				statLabel = statEntry.label,
+				stat = control.sortDetail.stat,
+				statLabel = control.sortDetail.statLabel,
 				slots = slots,
 				items = { ["1"] = rawBetter, ["2"] = rawWorse },
 			})
+			assert.is_nil(results.workerError)
 			for i, item in ipairs(items) do
 				assert.are.equal(item.measuredPower, results[tostring(i)], item.name)
 			end
+		end)
+
+		it("every item sort option resolves to a stat the itemPower worker can find", function()
+			-- The handler locates its stat entry by (stat, label) pair. If a sort
+			-- option cannot be resolved the handler has no way to measure anything,
+			-- every candidate keeps its -inf placeholder, and the list silently comes
+			-- back unsorted -- so assert the two sides agree for every option.
+			local control = new("ItemDBControl", nil, { 0, 0, 100, 100 }, build.itemsTab, { list = { } }, "RARE")
+			local checked = 0
+			for _, option in ipairs(control.sortDropList) do
+				if option.stat then
+					local found
+					for _, entry in ipairs(data.powerStatList) do
+						if entry.stat == option.stat and entry.label == option.statLabel then
+							found = entry
+							break
+						end
+					end
+					assert.is_not_nil(found, "no powerStatList entry for sort option " .. tostring(option.label))
+					checked = checked + 1
+				end
+			end
+			assert.is_true(checked > 0)
 		end)
 
 		it("nodePower matches direct calculation for adds and removals", function()

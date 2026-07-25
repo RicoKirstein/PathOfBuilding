@@ -26,6 +26,8 @@ function jobHandlers.gemDps(payload)
 	local calcFunc = build.calcsTab:GetMiscCalculator()
 	local dpsField = payload.dpsField
 	local useFullDPS = dpsField == "FullDPS"
+	-- Ranking by the group's own skill rather than by the build's main skill
+	local ownGroupIndex = payload.ownGroup and payload.groupIndex or nil
 	local results = { }
 	for _, gemId in ipairs(payload.gemIds) do
 		-- Dropdown gem keys carry a variant prefix ("Default:<id>") that the data
@@ -36,7 +38,7 @@ function jobHandlers.gemDps(payload)
 			gemData = rawId and build.data.gems[rawId]
 		end
 		if gemData then
-			local okCalc, output = pcall(skillsTab.CalcGemSwapOutput, skillsTab, group, payload.gemIndex, gemData, calcFunc, useFullDPS)
+			local okCalc, output = pcall(skillsTab.CalcGemSwapOutput, skillsTab, group, payload.gemIndex, gemData, calcFunc, useFullDPS, nil, ownGroupIndex)
 			if okCalc and output then
 				results[gemId] = skillsTab.ExtractGemDps(output, dpsField)
 			elseif not results.workerError then
@@ -62,7 +64,10 @@ function jobHandlers.itemPower(payload)
 	end
 	local results = { }
 	if not statEntry then
-		return results
+		-- Returning an empty table here would leave every candidate on its -inf
+		-- placeholder and silently produce an unsorted list, so say so instead
+		return { workerError = string.format("itemPower: no stat in data.powerStatList matches stat=%q label=%q",
+			tostring(payload.stat), tostring(payload.statLabel)) }
 	end
 	for key, raw in pairs(payload.items) do
 		local item = new("Item", raw)

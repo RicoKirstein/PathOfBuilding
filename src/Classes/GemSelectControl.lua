@@ -55,6 +55,15 @@ local GemSelectClass = newClass("GemSelectControl", "EditControl", function(self
 	self.imbuedSelect = imbued
 end)
 
+-- Index of the displayed socket group when candidates are being ranked by that
+-- group's own skill rather than by the build's main skill, nil otherwise
+function GemSelectClass:GetOwnDPSGroupIndex()
+	if not self.skillsTab.sortGemsByOwnDPS or self.imbuedSelect then
+		return nil
+	end
+	return self.skillsTab:GetSocketGroupIndex(self.skillsTab.displayGroup)
+end
+
 function GemSelectClass:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
 	local displayGroup = self.skillsTab.displayGroup
 	local displayGemList = displayGroup.displayGemList
@@ -63,7 +72,7 @@ function GemSelectClass:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
 	if self.imbuedSelect then
 		self.index = #displayGroup.gemList + 1
 	end
-	local output, gemInstance = self.skillsTab:CalcGemSwapOutput(displayGroup, self.index, gemData, calcFunc, useFullDPS, self.imbuedSelect)
+	local output, gemInstance = self.skillsTab:CalcGemSwapOutput(displayGroup, self.index, gemData, calcFunc, useFullDPS, self.imbuedSelect, self:GetOwnDPSGroupIndex())
 
 	displayGroup.displayGemList = displayGemList
 
@@ -223,11 +232,15 @@ function GemSelectClass:UpdateSortCache()
 	--local start = GetTime()
 	local sortCache = self.sortCache
 	local sameSortBy = self.sortGemsBy == self.lastSortGemsBy
+	-- When set, candidates are ranked by the DPS of the skill they would make in
+	-- this socket group instead of by their effect on the selected main skill
+	local ownGroupIndex = self:GetOwnDPSGroupIndex()
 	-- Don't update the cache if no settings have changed that would impact the ordering
 	if sameSortBy and sortCache and sortCache.socketGroup == self.skillsTab.displayGroup and sortCache.gemInstance == self.skillsTab.displayGroup.gemList[self.index]
 		and sortCache.outputRevision == self.skillsTab.build.outputRevision and sortCache.defaultLevel == self.skillsTab.defaultGemLevel
 		and (sortCache.characterLevel == self.skillsTab.build.characterLevel or self.skillsTab.defaultGemLevel ~= "characterLevel")
 		and sortCache.defaultQuality == self.skillsTab.defaultGemQuality and sortCache.sortType == self.skillsTab.sortGemsByDPSField
+		and sortCache.ownGroupIndex == ownGroupIndex
 		and sortCache.considerGemType == self.skillsTab.showSupportGemTypes and sortCache.showLegacyGems == self.skillsTab.showLegacyGems then
 		return
 	end
@@ -254,7 +267,8 @@ function GemSelectClass:UpdateSortCache()
 		canSupport = { },
 		dps = { },
 		dpsColor = { },
-		sortType = self.skillsTab.sortGemsByDPSField
+		sortType = self.skillsTab.sortGemsByDPSField,
+		ownGroupIndex = ownGroupIndex
 	}
 	self.sortCache = sortCache
 
@@ -306,8 +320,32 @@ function GemSelectClass:UpdateSortCache()
 	local dpsField = self.skillsTab.sortGemsByDPSField
 	local useFullDPS = dpsField == "FullDPS"
 	local calcFunc, calcBase = self.skillsTab.build.calcsTab:GetMiscCalculator(self.build)
+	if ownGroupIndex then
+		-- What this group does before the candidate goes in, measured the same way
+		-- the candidates are, so the comparison colours and the hover tooltip both
+		-- read against this group rather than against the main skill
+		local ok, ownBase = pcall(self.skillsTab.CalcWithMainSocketGroup, self.skillsTab, ownGroupIndex, calcFunc, useFullDPS)
+		if ok then
+			sortCache.ownBase = ownBase
+			calcBase = ownBase
+		else
+			ownGroupIndex = nil
+			sortCache.ownGroupIndex = nil
+		end
+	end
 	-- Check for nil because some fields may not be populated, default to 0
 	local baseDPS = (dpsField == "FullDPS" and calcBase[dpsField] ~= nil and calcBase[dpsField]) or (calcBase.Minion and calcBase.Minion.CombinedDPS) or (calcBase[dpsField] ~= nil and calcBase[dpsField]) or 0
+
+	-- Gems worth spending a calculation pass on: supports that apply to this
+	-- group's skill, plus the active gems that can move the measured number --
+	-- normally only the ones with a global effect, but when ranking by this
+	-- group's own DPS every active gem is a candidate for the group's skill
+	local function shouldEvaluate(gemId, gemData)
+		if sortCache.canSupport[gemId] then
+			return true
+		end
+		return not gemData.grantedEffect.support and (ownGroupIndex ~= nil or gemData.grantedEffect.hasGlobalEffect)
+	end
 
 	local function applyDpsColor(gemId)
 		if sortCache.dps[gemId] > baseDPS then
@@ -337,7 +375,7 @@ function GemSelectClass:UpdateSortCache()
 		for gemId, gemData in pairs(self.gems) do
 			sortCache.dps[gemId] = baseDPS
 			applyDpsColor(gemId)
-			if sortCache.canSupport[gemId] or (gemData.grantedEffect.hasGlobalEffect and not gemData.grantedEffect.support) then
+			if shouldEvaluate(gemId, gemData) then
 				t_insert(gemIds, gemId)
 			end
 		end
@@ -347,13 +385,14 @@ function GemSelectClass:UpdateSortCache()
 			groupIndex = groupIndex,
 			gemIndex = self.index,
 			dpsField = dpsField,
+			ownGroup = ownGroupIndex ~= nil or nil,
 			defaultLevel = self.skillsTab.defaultGemLevel,
 			defaultQuality = self.skillsTab.defaultGemQuality,
 		}, 2)
 		-- The sort cache gets rebuilt liberally (any validity field changing); an
 		-- identical request already in flight must be reused, not cancelled and
 		-- resubmitted, or the batch never lives long enough to finish
-		local sig = groupIndex .. "/" .. self.index .. "/" .. tostring(dpsField) .. "/" .. #gemIds
+		local sig = groupIndex .. "/" .. self.index .. "/" .. tostring(dpsField) .. "/" .. tostring(ownGroupIndex) .. "/" .. #gemIds
 		if self.pendingGemBatch and self.pendingGemSig == sig and not self.pendingGemBatch.cancelled then
 			sortCache.pendingDps = self.pendingGemBatch
 		else
@@ -398,7 +437,7 @@ function GemSelectClass:UpdateSortCache()
 		for gemId, gemData in pairs(self.gems) do
 			sortCache.dps[gemId] = baseDPS
 			-- Ignore gems that don't support the active skill
-			if sortCache.canSupport[gemId] or (gemData.grantedEffect.hasGlobalEffect and not gemData.grantedEffect.support) then
+			if shouldEvaluate(gemId, gemData) then
 				local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
 				sortCache.dps[gemId] = self.skillsTab.ExtractGemDps(output, dpsField)
 			end
@@ -526,7 +565,7 @@ function GemSelectClass:Draw(viewPort, noTooltip)
 				if gemData.grantedEffect.support and self.sortCache.canSupport[gemId] then
 					SetDrawColor(self.sortCache.dpsColor[gemId])
 					main:DrawCheckMark(width - 4 - height / 2 - (scrollBar.enabled and 18 or 0), y + (height - 4) / 2, (height - 4) * 0.8)
-				elseif gemData.grantedEffect.hasGlobalEffect then
+				elseif gemData.grantedEffect.hasGlobalEffect or (self.sortCache.ownGroupIndex and not gemData.grantedEffect.support) then
 					SetDrawColor(self.sortCache.dpsColor[gemId])
 					DrawString(width - 4 - height / 2 - (scrollBar.enabled and 18 or 0), y - 2, "CENTER_X", height, "VAR", "+")
 				end
@@ -555,7 +594,10 @@ function GemSelectClass:Draw(viewPort, noTooltip)
 					}
 				self:AddGemTooltip(gemInstance)
 				self.tooltip:AddSeparator(10)
-				self.skillsTab.build:AddStatComparesToTooltip(self.tooltip, calcBase, output, "^7Selecting this gem will give you:")
+				-- In own-DPS mode both sides of the comparison describe this socket
+				-- group, so the numbers match the ordering in the list
+				local compareBase = self.sortCache.ownBase or calcBase
+				self.skillsTab.build:AddStatComparesToTooltip(self.tooltip, compareBase, output, "^7Selecting this gem will give you:")
 				self.tooltip:Draw(x, y + height + 2 + (self.hoverSel - 1) * (height - 4) - scrollBar.offset, width, height - 4, viewPort)
 			end
 		end
