@@ -22,6 +22,8 @@ local ComparePowerReportListClass = newClass("ComparePowerReportListControl", "L
 	self.colLabels = true
 	self.showRowSeparators = true
 	self.statusText = "Select a metric above to generate the power report."
+	-- Column the user last sorted by, nil until a header is clicked
+	self.sortColIndex = nil
 end)
 
 function ComparePowerReportListClass:SetReport(stat, report)
@@ -39,7 +41,7 @@ function ComparePowerReportListClass:SetReport(stat, report)
 	end
 
 	self:ReList()
-	self:ReSort(3)
+	self:ApplySort(self.sortColIndex or 3)
 end
 
 function ComparePowerReportListClass:SetProgress(progress)
@@ -67,7 +69,15 @@ function ComparePowerReportListClass:Draw(viewPort, noTooltip)
 	end
 end
 
+-- The list control calls this when a column header is clicked, so it is where
+-- the choice is remembered: the report is regenerated whenever either build
+-- changes, which would otherwise drop the list back to impact order
 function ComparePowerReportListClass:ReSort(colIndex)
+	self.sortColIndex = colIndex
+	self:ApplySort(colIndex)
+end
+
+function ComparePowerReportListClass:ApplySort(colIndex)
 	local compare = function(a, b) return a > b end
 
 	if colIndex == 1 then

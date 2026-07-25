@@ -60,4 +60,72 @@ describe("TreeTab", function()
 		assert.are.same(10, report[2].power)
 		assert.are.same("Two Hand Mastery: Gain 10 Damage", report[2].name)
 	end)
+
+	-- Pass: a column the user sorted by survives the report being rebuilt
+	-- Fail: every recalculation throws the chosen order away, which makes the
+	-- report unusable while editing the build it describes
+	it("keeps the power report on the column the user sorted by", function()
+		local reportList = build.treeTab.controls.powerReportList
+		local stat = { stat = "Damage", label = "Damage" }
+		-- The report is generated in power order
+		local function generatedReport()
+			return {
+				{ type = "Node", name = "High", power = 30, powerStr = "30", pathDist = 3, pathPower = 10, pathPowerStr = "10" },
+				{ type = "Node", name = "Mid", power = 20, powerStr = "20", pathDist = 1, pathPower = 20, pathPowerStr = "20" },
+				{ type = "Node", name = "Low", power = 10, powerStr = "10", pathDist = 2, pathPower = 5, pathPowerStr = "5" },
+			}
+		end
+		local function names()
+			local names = { }
+			for _, entry in ipairs(reportList.list) do
+				table.insert(names, entry.name)
+			end
+			return names
+		end
+
+		reportList:SetReport(stat, generatedReport())
+		assert.are.same({ "High", "Mid", "Low" }, names())
+
+		-- Clicking the "Points" header is what the list control calls
+		reportList:ReSort(4)
+		assert.are.same({ "Mid", "Low", "High" }, names())
+
+		-- A build edit regenerates the report from scratch
+		reportList:SetReport(stat, generatedReport())
+		assert.are.same({ "Mid", "Low", "High" }, names())
+
+		-- As does re-listing it, which the filter controls do
+		reportList:ReList()
+		assert.are.same({ "Mid", "Low", "High" }, names())
+	end)
+
+	-- Pass: the Summary tab's comparison report keeps its column too
+	-- Fail: it re-sorts by impact whenever either build changes
+	it("keeps the compare power report on the column the user sorted by", function()
+		local reportList = build.compareTab.controls.comparePowerReportList
+		local stat = { stat = "Damage", label = "Damage" }
+		local function generatedReport()
+			return {
+				{ category = "Tree", name = "High", impact = 30, impactStr = "30", pathDist = 3, perPoint = 10 },
+				{ category = "Tree", name = "Mid", impact = 20, impactStr = "20", pathDist = 1, perPoint = 20 },
+				{ category = "Tree", name = "Low", impact = 10, impactStr = "10", pathDist = 2, perPoint = 5 },
+			}
+		end
+		local function names()
+			local names = { }
+			for _, entry in ipairs(reportList.list) do
+				table.insert(names, entry.name)
+			end
+			return names
+		end
+
+		reportList:SetReport(stat, generatedReport())
+		assert.are.same({ "High", "Mid", "Low" }, names())
+
+		reportList:ReSort(4) -- "Points"
+		assert.are.same({ "Mid", "Low", "High" }, names())
+
+		reportList:SetReport(stat, generatedReport())
+		assert.are.same({ "Mid", "Low", "High" }, names())
+	end)
 end)

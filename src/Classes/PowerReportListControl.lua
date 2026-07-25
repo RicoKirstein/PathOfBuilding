@@ -26,19 +26,21 @@ local PowerReportListClass = newClass("PowerReportListControl", "ListControl", f
 	self.showMasteries = true
 	self.allocated = false
 	self.label = "Building Tree..."
-	
+	-- Column the user last sorted by, nil until a header is clicked
+	self.sortColIndex = nil
+
 	self.controls.filterSelect = new("DropDownControl", {"BOTTOMRIGHT", self, "TOPRIGHT"}, {0, -2, 200, 20},
 		{ "Show Unallocated", "Show Unallocated & Clusters", "Show Allocated" },
 		function(index, value)
 			self.showClusters = index == 2
 			self.allocated = index == 3
 			self:ReList()
-			self:ReSort(3) -- Sort by power
+			self:ApplySort(self.sortColIndex or 3) -- Sort by power
 		end)
 	self.controls.masteryCheck = new("CheckBoxControl", {"RIGHT", self.controls.filterSelect, "LEFT"}, {-120, 0, 18}, "Show Masteries:", function(state)
 		self.showMasteries = state
 		self:ReList()
-		self:ReSort(3) -- Sort by power
+		self:ApplySort(self.sortColIndex or 3) -- Sort by power
 	end, nil, true)
 end)
 
@@ -55,7 +57,15 @@ function PowerReportListClass:SetReport(stat, report)
 	self:ReList()
 end
 
+-- The list control calls this when a column header is clicked, so it is where
+-- the choice is remembered: the report is rebuilt from scratch on every build
+-- edit, which would otherwise drop the list back to the order it was generated in
 function PowerReportListClass:ReSort(colIndex)
+	self.sortColIndex = colIndex
+	self:ApplySort(colIndex)
+end
+
+function PowerReportListClass:ApplySort(colIndex)
 	-- Reverse power sort for allocated because it uses negative numbers
 	local compare = self.allocated and 
 		function(a, b) return a < b end
@@ -116,6 +126,12 @@ function PowerReportListClass:ReList()
 		if insert then
 			t_insert(self.list, item)
 		end
+	end
+
+	-- Keep the column the user picked; without this every recalculation snaps
+	-- the list back to the power order the report is generated in
+	if self.sortColIndex then
+		self:ApplySort(self.sortColIndex)
 	end
 end
 
