@@ -228,4 +228,65 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 			requests.FetchResultBlock = orig_fetchBlock
 		end)
 	end)
+
+	describe("FetchResultBlock", function()
+		local function tradeEntry(id, pseudoMods)
+			return {
+				id = id,
+				listing = {
+					price = { amount = 1, currency = "chaos", type = "~b/o" },
+					whisper = "hi",
+					account = { name = "seller" }
+				},
+				item = { extended = { text = common.base64.encode("Test Item") }, pseudoMods = pseudoMods }
+			}
+		end
+
+		local dkjson = require "dkjson"
+
+		local function fetchWith(result)
+			-- The mock has to go into _G: assigning to `launch` here would only write
+			-- to this spec's environment, and the module reads the real global.
+			-- ProcessQueue calls it with a colon, so the mock takes self
+			local orig_launch = _G.launch
+			_G.launch = {
+				DownloadPage = function(self, url, onComplete, opts)
+					onComplete({ body = dkjson.encode({ result = result }), header = "HTTP/1.1 200 OK" }, nil)
+				end
+			}
+			mock_limiter.NextRequestTime = function(self, policy, time)
+				return time - 1
+			end
+			requests.requestQueue = { search = {}, fetch = {} }
+			local items, errMsg
+			requests:FetchResultBlock("test", function(fetched, err)
+				items, errMsg = fetched, err
+			end)
+			requests:ProcessQueue()
+			_G.launch = orig_launch
+			return items, errMsg
+		end
+
+		-- Pass: reads the weighted sum when there is one, otherwise falls back to "0"
+		-- Fail: indexes a missing pseudo mod, crashing every unweighted fetch (search
+		-- by URL, buy similar) before any result reaches the user
+		it("defaults the weight when the item has no pseudo mods", function()
+			local items, errMsg = fetchWith({
+				tradeEntry("absent", nil),
+				tradeEntry("empty", {}),
+				tradeEntry("weighted", { "Sum: 123.4" })
+			})
+			assert.is_nil(errMsg)
+			assert.are.equal(3, #items)
+			local byId = {}
+			for _, item in ipairs(items) do
+				byId[item.id] = item
+			end
+			assert.are.equal("0", byId.absent.weight)
+			assert.are.equal("0", byId.empty.weight)
+			assert.are.equal("123.4", byId.weighted.weight)
+			assert.are.equal("Test Item", byId.weighted.item_string)
+			assert.are.equal("seller", byId.weighted.trader)
+		end)
+	end)
 end)
