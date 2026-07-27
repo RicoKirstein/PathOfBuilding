@@ -37,6 +37,15 @@ function io.open(name, mode)
 	return rawOpen(resolve(name), mode)
 end
 
+-- HeadlessWrapper replaces the whole host API with stubs, including file
+-- functions a subscript genuinely has. Keep the real ones and put them back
+-- afterwards, or anything loaded by path fails in here while working fine on the
+-- main thread.
+local hostFuncs = { }
+for _, name in ipairs({ "NewFileSearch", "Inflate", "Deflate", "GetTime", "MakeDir", "GetRuntimePath" }) do
+	hostFuncs[name] = _G[name]
+end
+
 local ok, err = pcall(dofile, "HeadlessWrapper.lua")
 if not ok then
 	PoBWorkerPoolRPC(workerId, "fatal", 0, nil, "environment load failed: " .. tostring(err))
@@ -46,9 +55,48 @@ if not loadBuildFromXML then
 	PoBWorkerPoolRPC(workerId, "fatal", 0, nil, "environment incomplete: " .. tostring(mainObject and mainObject.promptMsg))
 	return "failed"
 end
+for name, hostFunc in pairs(hostFuncs) do
+	_G[name] = hostFunc
+end
 -- The headless stub returns "", which breaks TimelessJewelData loading
 function GetScriptPath()
 	return srcPath
+end
+
+-- Timeless Jewel LUTs are found with NewFileSearch and decompressed with
+-- Inflate. If the host gave the subscript neither, the stubs (nil handle, empty
+-- string) make the LUT unloadable, PassiveSpec:BuildAllDependsAndPaths throws,
+-- and every job in this worker then dies on a nil misc calculator -- silently,
+-- since a failed job just leaves its candidate on the caller's baseline value.
+-- The main thread has the real functions and writes the decompressed .bin next
+-- to the .zip, so point the search at that cache. Only the modified time is
+-- faked: a .bin that is missing or truncated still falls through to the (dead)
+-- decompress path rather than yielding wrong data.
+if not hostFuncs.NewFileSearch then
+	local searchHandle = { }
+	searchHandle.__index = searchHandle
+	function searchHandle:GetFileName() return self.name end
+	function searchHandle:GetFileModifiedTime() return self.modified end
+	function searchHandle:GetFileSize() return self.size end
+	function searchHandle:NextFile() return false end
+	function NewFileSearch(pattern)
+		-- Only exact paths are answerable without a real directory search
+		if pattern:match("[*?]") then
+			return nil
+		end
+		local file = io.open(pattern, "rb")
+		if not file then
+			return nil
+		end
+		local size = file:seek("end")
+		file:close()
+		return setmetatable({
+			name = pattern:match("([^/\\]*)$"),
+			size = size,
+			-- Rank an existing .bin above the .zip it was decompressed from
+			modified = pattern:match("%.bin$") and 1 or 0,
+		}, searchHandle)
+	end
 end
 
 local dkjson = require("dkjson")
