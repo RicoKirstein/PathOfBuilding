@@ -973,7 +973,7 @@ local function doActorCharges(env, actor)
 	output.CrabBarriersMax = m_max(modDB:Sum("BASE", nil, "CrabBarriersMax"), 0)
 	output.BrutalChargesMin = m_max(modDB:Flag(nil, "MinimumEnduranceChargesEqualsMinimumBrutalCharges") and (modDB:Flag(nil, "MinimumEnduranceChargesIsMaximumEnduranceCharges") and output.EnduranceChargesMax or output.EnduranceChargesMin) or 0 , 0)
 	output.BrutalChargesMax = m_max(modDB:Flag(nil, "MaximumEnduranceChargesEqualsMaximumBrutalCharges") and output.EnduranceChargesMax or 0, 0)
-	output.BrineChargesMax = m_max(modDB:Flag(nil, "MaximumEnduranceChargesEqualsMaximumBrineCharges") and output.EnduranceChargesMax or 0, 0)
+	output.BrineChargesMax = m_max(output.EnduranceChargesMax or 0, 0)
 	output.AbsorptionChargesMin = m_max(modDB:Flag(nil, "MinimumPowerChargesEqualsMinimumAbsorptionCharges") and (modDB:Flag(nil, "MinimumPowerChargesIsMaximumPowerCharges") and output.PowerChargesMax or output.PowerChargesMin) or 0, 0)
 	output.AbsorptionChargesMax = m_max(modDB:Flag(nil, "MaximumPowerChargesEqualsMaximumAbsorptionCharges") and output.PowerChargesMax or 0, 0)
 	output.AfflictionChargesMin = m_max(modDB:Flag(nil, "MinimumFrenzyChargesEqualsMinimumAfflictionCharges") and (modDB:Flag(nil, "MinimumFrenzyChargesIsMaximumFrenzyCharges") and output.FrenzyChargesMax or output.FrenzyChargesMin) or 0, 0)
@@ -3497,10 +3497,11 @@ function calcs.perform(env, skipEHP)
 			for _, value in ipairs(modDB:Tabulate("BASE", nil, ailment.."Base", ailment.."Override", ailment.."Minimum")) do
 				local mod = value.mod
 				local effect = mod.value
+				local scalesWithSource = mod.name == ailment.."Base" or mod.name == ailment.."Minimum"
 				if mod.name == ailment.."Override" then
 					enemyDB:NewMod("Condition:"..val.condition, "FLAG", true, mod.source)
 				end
-				if mod.name == ailment.."Base" or mod.name == ailment.."Minimum" then
+				if scalesWithSource then
 					-- If the main skill can inflict the ailment, the ailment is inflicted with a hit, and we have a node allocated that checks what our highest damage is, then
 					-- use the skill's ailment modifiers
 					-- if not, use the generic modifiers
@@ -3510,6 +3511,9 @@ function calcs.perform(env, skipEHP)
 					else
 						effect = effect * calcLib.mod(modDB, nil, "Enemy"..ailment.."Effect")
 					end
+				end
+				effect = effect * calcLib.mod(enemyDB, nil, "Self"..ailment.."Effect")
+				if scalesWithSource then
 					modDB:NewMod(ailment.."Override", "BASE", effect, mod.source, mod.flags, mod.keywordFlags, unpack(mod))
 					if mod.name == ailment.."Minimum" then
 						minimum = minimum + effect

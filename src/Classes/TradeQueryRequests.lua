@@ -292,7 +292,8 @@ function TradeQueryRequestsClass:FetchResultBlock(url, callback)
 			for _, trade_entry in pairs(response.result) do
 				-- Only a weighted search asks for the "Sum: <n>" pseudo mod; anything
 				-- else comes back with the list missing or empty, so it can't be indexed blind
-				local pseudoSum = type(trade_entry.item.pseudoMods) == "table" and trade_entry.item.pseudoMods[1]
+				local pseudoMod = type(trade_entry.item.pseudoMods) == "table" and trade_entry.item.pseudoMods[1]
+				local pseudoModLine = pseudoMod and (pseudoMod.description or pseudoMod)
 				table.insert(items, {
 					amount = trade_entry.listing.price.amount,
 					currency = trade_entry.listing.price.currency,
@@ -300,7 +301,7 @@ function TradeQueryRequestsClass:FetchResultBlock(url, callback)
 					item_string = escapeGGGString(common.base64.decode(trade_entry.item.extended.text)),
 					whisper = trade_entry.listing.whisper,
 					trader = trade_entry.listing.account.name,
-					weight = type(pseudoSum) == "string" and pseudoSum:match("Sum: (.+)") or "0",
+					weight = type(pseudoModLine) == "string" and pseudoModLine:match("Sum: (.+)") or "0",
 					id = trade_entry.id
 				})
 			end

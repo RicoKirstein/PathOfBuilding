@@ -61,7 +61,8 @@ for _, entry in pairs(data.flavourText) do
 end
 
 local function isAnointable(item)
-	return (item.canBeAnointed or item.base.type == "Amulet")
+	return item and item.base and not item.base.cannotBeAnointed
+		and (item.canBeAnointed or item.base.type == "Amulet")
 end
 
 local function buildModSortList()
@@ -965,7 +966,7 @@ holding Shift will put it in the second.]])
 		return self.displayItem and self.displayItem.rangeLineList[1] ~= nil and not (main.showAllItemAffixes and self.displayItem.rarity == "UNIQUE")
 	end
 	local function getSelectedModLine()
-		return self.controls.displayItemRangeLine:GetSelValue() and self.controls.displayItemRangeLine:GetSelValue().modLine or nil
+		return self.displayItem and self.displayItem.rangeLineList[self.controls.displayItemRangeLine.selIndex] or nil
 	end
 	local box = new("CheckBoxControl", { "LEFT", self.controls.displayItemRangeLine, "RIGHT", true }, { 0, 0, 18 }, nil)
 	box.changeFunc = function(val)
@@ -1012,7 +1013,7 @@ holding Shift will put it in the second.]])
 		self:UpdateCustomControls()
 	end)
 	slider.shown = function()
-		local modLine = not main.showAllItemAffixes and self.displayItem and self.displayItem.rarity == "UNIQUE" and self.displayItem.rangeLineList[self.controls.displayItemRangeLine.selIndex]
+		local modLine = self.displayItem and not (main.showAllItemAffixes and self.displayItem.rarity == "UNIQUE") and self.displayItem.rangeLineList[self.controls.displayItemRangeLine.selIndex]
 		if modLine then
 			-- it's possible for the range to change while this slider is
 			-- hidden, so correct the slider to show the same value
@@ -2664,7 +2665,7 @@ end
 ---@param item table @The item to inspect
 ---@return number @How many additional anoints can still be applied
 function ItemsTabClass:getMissingAnointCount(item)
-	if not item or not item.base or not (item.canBeAnointed or item.base.type == "Amulet") then
+	if not isAnointable(item) then
 		return 0
 	end
 	local maxAnoints = item.canHaveFourEnchants and 4 or item.canHaveThreeEnchants and 3 or item.canHaveTwoEnchants and 2 or 1
