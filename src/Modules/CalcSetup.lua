@@ -1761,16 +1761,31 @@ function calcs.initEnv(build, mode, override, specEnv)
 				end
 
 				if index == env.mainSocketGroup and #socketGroupSkillList > 0 then
+					-- A gem staged into this group by the skill dropdown has to be the skill
+					-- that gets measured, otherwise the group keeps reporting whatever
+					-- mainActiveSkill already pointed at and every candidate ranks the same.
+					-- Vaal gems grant the Vaal skill first and the sustainable one second,
+					-- so take the last skill the staged gem contributes: ranking candidates
+					-- on a soul-gated skill would not compare with anything else in the list.
+					local stagedSkillIndex
+					if override.mainSkillSrcInstance then
+						for skillIndex, activeSkill in ipairs(socketGroupSkillList) do
+							if activeSkill.activeEffect.srcInstance == override.mainSkillSrcInstance then
+								stagedSkillIndex = skillIndex
+							end
+						end
+					end
 					-- Select the main skill from this socket group
 					local activeSkillIndex
 					if env.mode == "CALCS" then
 						group.mainActiveSkillCalcs = m_min(#socketGroupSkillList, group.mainActiveSkillCalcs or 1)
-						activeSkillIndex = group.mainActiveSkillCalcs
+						activeSkillIndex = stagedSkillIndex or group.mainActiveSkillCalcs
 					else
 						activeSkillIndex = m_min(#socketGroupSkillList, group.mainActiveSkill or 1)
 						if env.mode == "MAIN" then
 							group.mainActiveSkill = activeSkillIndex
 						end
+						activeSkillIndex = stagedSkillIndex or activeSkillIndex
 					end
 					env.player.mainSkill = socketGroupSkillList[activeSkillIndex]
 				end

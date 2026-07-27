@@ -1080,10 +1080,10 @@ end
 -- Runs a calculation with the given socket group standing in as the main skill
 -- group, so the output describes that group's own skill rather than the build's
 -- selected main skill. The selection is restored even if the calculation errors.
-function SkillsTabClass:CalcWithMainSocketGroup(groupIndex, calcFunc, useFullDPS)
+function SkillsTabClass:CalcWithMainSocketGroup(groupIndex, calcFunc, useFullDPS, override)
 	local prevMainSocketGroup = self.build.mainSocketGroup
 	self.build.mainSocketGroup = groupIndex
-	local ok, output = pcall(calcFunc, nil, useFullDPS)
+	local ok, output = pcall(calcFunc, override, useFullDPS)
 	self.build.mainSocketGroup = prevMainSocketGroup
 	if not ok then
 		error(output, 0)
@@ -1121,7 +1121,11 @@ function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFu
 	-- Calculate the impact of using this gem
 	local ok, output
 	if ownGroupIndex then
-		ok, output = pcall(self.CalcWithMainSocketGroup, self, ownGroupIndex, calcFunc, useFullDPS)
+		-- Naming the staged instance makes the skill it grants the one being measured,
+		-- so an active gem ranks on its own DPS wherever it sits in the group -- including
+		-- a free socket, where the group's stored main-skill index would otherwise win
+		ok, output = pcall(self.CalcWithMainSocketGroup, self, ownGroupIndex, calcFunc, useFullDPS,
+			{ mainSkillSrcInstance = gemInstance })
 	else
 		ok, output = pcall(calcFunc, nil, useFullDPS)
 	end
