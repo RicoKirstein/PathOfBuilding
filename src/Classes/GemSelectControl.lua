@@ -10,6 +10,7 @@ local t_sort = table.sort
 local m_min = math.min
 local m_max = math.max
 local m_floor = math.floor
+local m_abs = math.abs
 
 local gemTooltip = LoadModule("Classes/GemTooltip")
 local toolTipText = "Prefix tag searches with a colon and exclude tags with a dash. e.g. :fire:lightning:-cold:area"
@@ -267,6 +268,9 @@ function GemSelectClass:UpdateSortCache()
 		canSupport = { },
 		dps = { },
 		dpsColor = { },
+		-- Candidates that actually got a calculation pass; the rest keep the
+		-- baseline value and must not be shown as if they had been measured
+		evaluated = { },
 		sortType = self.skillsTab.sortGemsByDPSField,
 		ownGroupIndex = ownGroupIndex
 	}
@@ -335,16 +339,18 @@ function GemSelectClass:UpdateSortCache()
 	end
 	-- Check for nil because some fields may not be populated, default to 0
 	local baseDPS = (dpsField == "FullDPS" and calcBase[dpsField] ~= nil and calcBase[dpsField]) or (calcBase.Minion and calcBase.Minion.CombinedDPS) or (calcBase[dpsField] ~= nil and calcBase[dpsField]) or 0
+	-- The row drawing needs it to show each candidate as a change against this group
+	sortCache.baseDPS = baseDPS
 
 	-- Gems worth spending a calculation pass on: supports that apply to this
 	-- group's skill, plus the active gems that can move the measured number --
 	-- normally only the ones with a global effect, but when ranking by this
 	-- group's own DPS every active gem is a candidate for the group's skill
 	local function shouldEvaluate(gemId, gemData)
-		if sortCache.canSupport[gemId] then
-			return true
-		end
-		return not gemData.grantedEffect.support and (ownGroupIndex ~= nil or gemData.grantedEffect.hasGlobalEffect)
+		local evaluate = sortCache.canSupport[gemId]
+			or (not gemData.grantedEffect.support and (ownGroupIndex ~= nil or gemData.grantedEffect.hasGlobalEffect))
+		sortCache.evaluated[gemId] = evaluate or nil
+		return evaluate
 	end
 
 	local function applyDpsColor(gemId)
@@ -354,6 +360,22 @@ function GemSelectClass:UpdateSortCache()
 			sortCache.dpsColor[gemId] = "^xFF4422"
 		else
 			sortCache.dpsColor[gemId] = "^xFFFF66"
+		end
+	end
+
+	-- Evaluate every candidate on this thread. Also the fallback for a worker pool
+	-- that answers a batch without producing anything usable: a job that fails
+	-- leaves its candidate on the baseline, and a whole batch of those is an
+	-- unsorted list with no other symptom.
+	local function evaluateHere()
+		for gemId, gemData in pairs(self.gems) do
+			sortCache.dps[gemId] = baseDPS
+			-- Ignore gems that don't support the active skill
+			if shouldEvaluate(gemId, gemData) then
+				local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
+				sortCache.dps[gemId] = self.skillsTab.ExtractGemDps(output, dpsField)
+			end
+			applyDpsColor(gemId)
 		end
 	end
 
@@ -402,8 +424,10 @@ function GemSelectClass:UpdateSortCache()
 				if not cache then
 					return
 				end
+				local applied = 0
 				for gemId, dps in pairs(results) do
 					if cache.dps[gemId] then
+						applied = applied + 1
 						cache.dps[gemId] = dps
 						if dps > baseDPS then
 							cache.dpsColor[gemId] = "^x228866"
@@ -416,6 +440,13 @@ function GemSelectClass:UpdateSortCache()
 				end
 				if final then
 					cache.pendingDps = nil
+					-- Workers that all failed produce an empty batch. Redo the work here
+					-- rather than present a list ordered by nothing; only safe while this
+					-- is still the cache those upvalues belong to
+					if applied == 0 and #gemIds > 0 and cache == sortCache then
+						ConPrintf("Gem DPS sort: worker pool returned no results, calculating on the main thread")
+						evaluateHere()
+					end
 				end
 				self:SortGemList(self.list)
 			end
@@ -434,24 +465,44 @@ function GemSelectClass:UpdateSortCache()
 		end
 	end
 	if not sortCache.pendingDps then
-		for gemId, gemData in pairs(self.gems) do
-			sortCache.dps[gemId] = baseDPS
-			-- Ignore gems that don't support the active skill
-			if shouldEvaluate(gemId, gemData) then
-				local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
-				sortCache.dps[gemId] = self.skillsTab.ExtractGemDps(output, dpsField)
-			end
-			applyDpsColor(gemId)
-		end
+		evaluateHere()
 	end
 
 	--ConPrintf("Gem Selector time: %d ms", GetTime() - start)
 end
 
+-- Row label for a measured candidate: how it changes this socket group, as a
+-- percentage where there is something to compare against and as an absolute
+-- otherwise (a group whose current skill does no damage, e.g. an empty one)
+function GemSelectClass:FormatGemDelta(dps)
+	local baseDPS = self.sortCache.baseDPS or 0
+	if baseDPS > 0 then
+		local pct = (dps / baseDPS - 1) * 100
+		if pct ~= 0 and m_abs(pct) < 0.05 then
+			-- Do not round a real difference away to a flat "+0%"
+			return pct > 0 and "+<0.1%" or "-<0.1%"
+		end
+		return string.format("%+.1f%%", pct)
+	end
+	if dps >= 1e9 then
+		return string.format("%.2fB", dps / 1e9)
+	elseif dps >= 1e6 then
+		return string.format("%.2fM", dps / 1e6)
+	elseif dps >= 1e3 then
+		return string.format("%.1fk", dps / 1e3)
+	end
+	return string.format("%.0f", dps)
+end
+
 function GemSelectClass:SortGemList(gemList)
 	local sortCache = self.sortCache
+	-- Applicable supports normally outrank everything, which is right when the
+	-- question is "what should I link". When ranking by this group's own DPS the
+	-- question is "what should this group do", so an active skill that beats the
+	-- supports has to be allowed to say so instead of being buried under them.
+	local supportsFirst = not sortCache.ownGroupIndex
 	t_sort(gemList, function(a, b)
-		if sortCache.canSupport[a] == sortCache.canSupport[b] then
+		if not supportsFirst or sortCache.canSupport[a] == sortCache.canSupport[b] then
 			if self.skillsTab.sortGemsByDPS and sortCache.dps[a] ~= sortCache.dps[b] then
 				return sortCache.dps[a] > sortCache.dps[b]
 			else
@@ -562,7 +613,14 @@ function GemSelectClass:Draw(viewPort, noTooltip)
 			local gemText = gemData and gemData.name or "<No matches>"
 			DrawString(0, y, "LEFT", height - 4, "VAR", gemText)
 			if gemData then
-				if gemData.grantedEffect.support and self.sortCache.canSupport[gemId] then
+				-- Ranking a group's own skill is a comparison between candidates, and a
+				-- tick that only says "better" cannot be compared. Print the change each
+				-- measured candidate makes, so the list reads without hovering every row
+				if self.sortCache.ownGroupIndex and self.sortCache.evaluated[gemId] then
+					SetDrawColor(self.sortCache.dpsColor[gemId])
+					DrawString(width - 4 - (scrollBar.enabled and 18 or 0), y, "RIGHT_X", height - 4, "VAR",
+						self:FormatGemDelta(self.sortCache.dps[gemId]))
+				elseif gemData.grantedEffect.support and self.sortCache.canSupport[gemId] then
 					SetDrawColor(self.sortCache.dpsColor[gemId])
 					main:DrawCheckMark(width - 4 - height / 2 - (scrollBar.enabled and 18 or 0), y + (height - 4) / 2, (height - 4) * 0.8)
 				elseif gemData.grantedEffect.hasGlobalEffect or (self.sortCache.ownGroupIndex and not gemData.grantedEffect.support) then
