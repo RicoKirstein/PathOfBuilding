@@ -302,7 +302,13 @@ function TradeQueryRequestsClass:FetchResultBlock(url, callback)
 					whisper = trade_entry.listing.whisper,
 					trader = trade_entry.listing.account.name,
 					weight = type(pseudoModLine) == "string" and pseudoModLine:match("Sum: (.+)") or "0",
-					id = trade_entry.id
+					id = trade_entry.id,
+					-- The seller's character, and whatever tokens the listing carries.
+					-- Kept because the parse above drops everything it does not name,
+					-- so anything the site's own buttons rely on was being discarded
+					-- before it could be looked at.
+					characterName = trade_entry.listing.account.lastCharacterName,
+					listingRaw = trade_entry.listing,
 				})
 			end
 			return callback(items)
