@@ -87,6 +87,7 @@ local SkillsTabClass = newClass("SkillsTab", "UndoHandler", "ControlHost", "Cont
 	self.sortGemsByDPS = true
 	self.sortGemsByDPSField = "CombinedDPS"
 	self.sortGemsByOwnDPS = false
+	self.sortGemsSkillsOnly = false
 	self.showSupportGemTypes = "ALL"
 	self.showLegacyGems = false
 	self.defaultGemLevel = "normalMaximum"
@@ -121,7 +122,7 @@ local SkillsTabClass = newClass("SkillsTab", "UndoHandler", "ControlHost", "Cont
 	-- Gem options
 	local optionInputsX = 170
 	local optionInputsY = 45
-	self.controls.optionSection = new("SectionControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { 0, optionInputsY + 50, 360, 180 }, "Gem Options")
+	self.controls.optionSection = new("SectionControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { 0, optionInputsY + 50, 360, 204 }, "Gem Options")
 	self.controls.sortGemsByDPS = new("CheckBoxControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 70, 20 }, "Sort gems by DPS:", function(state)
 		self.sortGemsByDPS = state
 	end, nil, true)
@@ -142,7 +143,31 @@ local SkillsTabClass = newClass("SkillsTab", "UndoHandler", "ControlHost", "Cont
 		tooltip:AddLine(16, colorCodes.WARNING.."Warning:^7 every active gem is calculated, not just the supports that apply,")
 		tooltip:AddLine(16, "^7so opening the dropdown takes noticeably longer.")
 	end
-	self.controls.defaultLevel = new("DropDownControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 118, 170, 20 }, defaultGemLevelList, function(index, value)
+	self.controls.sortGemsSkillsOnly = new("CheckBoxControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 118, 20 }, "Skill gems only:", function(state)
+		self.sortGemsSkillsOnly = state
+	end)
+	self.controls.sortGemsSkillsOnly.enabled = function()
+		return self.sortGemsByOwnDPS
+	end
+	self.controls.sortGemsSkillsOnly.tooltipFunc = function(tooltip)
+		tooltip:Clear()
+		tooltip:AddLine(16, "^7Drops the support gems from the dropdown and ranks the active skill gems by what")
+		tooltip:AddLine(16, "^7this socket group would do running each of them with the supports it already has.")
+		tooltip:AddLine(16, " ")
+		tooltip:AddLine(16, "^7Answers \"should this group run a different skill\", where the plain ranking answers")
+		tooltip:AddLine(16, "^7\"what should I link to the skill it runs now\": the group's other active gems are")
+		tooltip:AddLine(16, "^7left out of the calculation, so a candidate is measured as this group's skill and")
+		tooltip:AddLine(16, "^7not as a second one running beside the current skill.")
+		tooltip:AddLine(16, " ")
+		tooltip:AddLine(16, "^7The supports counted are the ones the group would still have, so opening the")
+		tooltip:AddLine(16, "^7dropdown on a support's socket measures each candidate without that support.")
+		tooltip:AddLine(16, " ")
+		tooltip:AddLine(16, colorCodes.WARNING.."Warning:^7 picking a gem still puts it in the socket you opened, so selecting one")
+		tooltip:AddLine(16, "^7from an empty socket leaves the group's current skill in place next to it.")
+		tooltip:AddLine(16, " ")
+		tooltip:AddLine(16, "^7Requires "..colorCodes.CUSTOM.."Rank by this group's DPS^7.")
+	end
+	self.controls.defaultLevel = new("DropDownControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 142, 170, 20 }, defaultGemLevelList, function(index, value)
 		self.defaultGemLevel = value.gemLevel
 	end)
 	self.controls.defaultLevel.tooltipFunc = function(tooltip, mode, index, value)
@@ -152,15 +177,15 @@ local SkillsTabClass = newClass("SkillsTab", "UndoHandler", "ControlHost", "Cont
 		end
 	end
 	self.controls.defaultLevelLabel = new("LabelControl", { "RIGHT", self.controls.defaultLevel, "LEFT" }, { -4, 0, 0, 16 }, "^7Default gem level:")
-	self.controls.defaultQuality = new("EditControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 142, 60, 20 }, nil, nil, "%D", 2, function(buf)
+	self.controls.defaultQuality = new("EditControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 166, 60, 20 }, nil, nil, "%D", 2, function(buf)
 		self.defaultGemQuality = m_min(tonumber(buf) or 0, 23)
 	end)
 	self.controls.defaultQualityLabel = new("LabelControl", { "RIGHT", self.controls.defaultQuality, "LEFT" }, { -4, 0, 0, 16 }, "^7Default gem quality:")
-	self.controls.showSupportGemTypes = new("DropDownControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 166, 170, 20 }, showSupportGemTypeList, function(index, value)
+	self.controls.showSupportGemTypes = new("DropDownControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 190, 170, 20 }, showSupportGemTypeList, function(index, value)
 		self.showSupportGemTypes = value.show
 	end)
 	self.controls.showSupportGemTypesLabel = new("LabelControl", { "RIGHT", self.controls.showSupportGemTypes, "LEFT" }, { -4, 0, 0, 16 }, "^7Show support gems:")
-	self.controls.showLegacyGems = new("CheckBoxControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 190, 20 }, "^7Show legacy gems:", function(state)
+	self.controls.showLegacyGems = new("CheckBoxControl", { "TOPLEFT", self.controls.groupList, "BOTTOMLEFT" }, { optionInputsX, optionInputsY + 214, 20 }, "^7Show legacy gems:", function(state)
 		self.showLegacyGems = state
 	end)
 
@@ -455,6 +480,10 @@ function SkillsTabClass:Load(xml, fileName)
 		self.sortGemsByOwnDPS = xml.attrib.sortGemsByOwnDPS == "true"
 	end
 	self.controls.sortGemsByOwnDPS.state = self.sortGemsByOwnDPS
+	if xml.attrib.sortGemsSkillsOnly then
+		self.sortGemsSkillsOnly = xml.attrib.sortGemsSkillsOnly == "true"
+	end
+	self.controls.sortGemsSkillsOnly.state = self.sortGemsSkillsOnly
 	if xml.attrib.showLegacyGems then
 		self.showLegacyGems = xml.attrib.showLegacyGems == "true"
 	end
@@ -493,6 +522,7 @@ function SkillsTabClass:Save(xml)
 		defaultGemQuality = tostring(self.defaultGemQuality),
 		sortGemsByDPS = tostring(self.sortGemsByDPS),
 		sortGemsByOwnDPS = tostring(self.sortGemsByOwnDPS),
+		sortGemsSkillsOnly = tostring(self.sortGemsSkillsOnly),
 		showSupportGemTypes = self.showSupportGemTypes,
 		sortGemsByDPSField = self.sortGemsByDPSField,
 		showLegacyGems = tostring(self.showLegacyGems),
@@ -1094,7 +1124,9 @@ end
 -- Calculates the build with `gemData` staged into the given socket, and returns
 -- the output plus the gem instance it staged. Passing `ownGroupIndex` (the index
 -- of `group`) measures the group's own skill instead of the selected main skill.
-function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFullDPS, imbued, ownGroupIndex)
+-- `soloActiveSkill` additionally suppresses the group's other active gems, so the
+-- candidate is measured as the group's skill rather than as one added next to it.
+function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFullDPS, imbued, ownGroupIndex, soloActiveSkill)
 	local gemList = group.gemList
 	local oldGem
 	if gemList[index] then
@@ -1118,6 +1150,29 @@ function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFu
 	gemInstance.level = self:ProcessGemLevel(gemData, imbued)
 	gemInstance.gemData = gemData
 	gemInstance.displayEffect = nil
+	-- The per-effect toggles left in the socket describe the gem that was there, and
+	-- a gem granting one skill saves enableGlobal2 = false. Staging a two-skill gem
+	-- into it would then drop that gem's second skill: a Vaal gem would be measured
+	-- on its soul-gated skill alone and rank far above what it can sustain. A gem
+	-- staged into a free socket gets both toggles on, so give this one the same.
+	gemInstance.enableGlobal1 = true
+	gemInstance.enableGlobal2 = true
+	-- Asking what this group would do with another skill in it means the skills it
+	-- already has must step aside: they keep granting themselves, and a candidate
+	-- that grants a skill one of them already grants is folded into that skill and
+	-- reports its DPS instead of its own -- an alternative to Flicker Strike then
+	-- comes back at exactly the Flicker Strike the group is already running.
+	local suppressed
+	if soloActiveSkill then
+		for otherIndex, other in ipairs(gemList) do
+			local grantedEffect = other.gemData and other.gemData.grantedEffect or other.grantedEffect
+			if otherIndex ~= index and other.enabled and grantedEffect and not grantedEffect.support then
+				suppressed = suppressed or { }
+				t_insert(suppressed, other)
+				other.enabled = false
+			end
+		end
+	end
 	-- Calculate the impact of using this gem
 	local ok, output
 	if ownGroupIndex then
@@ -1129,11 +1184,18 @@ function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFu
 	else
 		ok, output = pcall(calcFunc, nil, useFullDPS)
 	end
+	if suppressed then
+		for _, other in ipairs(suppressed) do
+			other.enabled = true
+		end
+	end
 	-- Put the original gem back into the list
 	if oldGem then
 		gemInstance.gemData = oldGem.gemData
 		gemInstance.level = oldGem.level
 		gemInstance.displayEffect = oldGem.displayEffect
+		gemInstance.enableGlobal1 = oldGem.enableGlobal1
+		gemInstance.enableGlobal2 = oldGem.enableGlobal2
 	else
 		gemList[index] = nil
 	end

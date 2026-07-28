@@ -28,6 +28,8 @@ function jobHandlers.gemDps(payload)
 	local useFullDPS = dpsField == "FullDPS"
 	-- Ranking by the group's own skill rather than by the build's main skill
 	local ownGroupIndex = payload.ownGroup and payload.groupIndex or nil
+	-- Ranking candidate skills for the group: its other active gems stand aside
+	local soloActiveSkill = payload.soloSkill and true or false
 	local results = { }
 	for _, gemId in ipairs(payload.gemIds) do
 		-- Dropdown gem keys carry a variant prefix ("Default:<id>") that the data
@@ -38,7 +40,7 @@ function jobHandlers.gemDps(payload)
 			gemData = rawId and build.data.gems[rawId]
 		end
 		if gemData then
-			local okCalc, output = pcall(skillsTab.CalcGemSwapOutput, skillsTab, group, payload.gemIndex, gemData, calcFunc, useFullDPS, nil, ownGroupIndex)
+			local okCalc, output = pcall(skillsTab.CalcGemSwapOutput, skillsTab, group, payload.gemIndex, gemData, calcFunc, useFullDPS, nil, ownGroupIndex, soloActiveSkill)
 			if okCalc and output then
 				results[gemId] = skillsTab.ExtractGemDps(output, dpsField)
 			elseif not results.workerError then

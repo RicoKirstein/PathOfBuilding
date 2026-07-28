@@ -65,6 +65,24 @@ function GemSelectClass:GetOwnDPSGroupIndex()
 	return self.skillsTab:GetSocketGroupIndex(self.skillsTab.displayGroup)
 end
 
+-- True when the dropdown is answering "what skill should this group run" rather
+-- than "what should I link to it": only active gems are offered, and each is
+-- measured as the group's own skill with the supports the group already has
+function GemSelectClass:IsSkillsOnly()
+	return (self.skillsTab.sortGemsSkillsOnly and self:GetOwnDPSGroupIndex() ~= nil) or false
+end
+
+-- The gem sitting in this socket, which stays in the list whatever the filters
+-- say: a gem the list cannot offer back cannot be matched when the control loses
+-- focus, and an unmatched buffer deletes the gem
+function GemSelectClass:IsSocketedGem(gemId)
+	if self.imbuedSelect or not self.skillsTab.displayGroup then
+		return false
+	end
+	local gemInstance = self.skillsTab.displayGroup.gemList[self.index]
+	return gemInstance ~= nil and gemInstance.gemId ~= nil and gemId:gsub("%w+:", "") == gemInstance.gemId
+end
+
 function GemSelectClass:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
 	local displayGroup = self.skillsTab.displayGroup
 	local displayGemList = displayGroup.displayGemList
@@ -73,7 +91,7 @@ function GemSelectClass:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
 	if self.imbuedSelect then
 		self.index = #displayGroup.gemList + 1
 	end
-	local output, gemInstance = self.skillsTab:CalcGemSwapOutput(displayGroup, self.index, gemData, calcFunc, useFullDPS, self.imbuedSelect, self:GetOwnDPSGroupIndex())
+	local output, gemInstance = self.skillsTab:CalcGemSwapOutput(displayGroup, self.index, gemData, calcFunc, useFullDPS, self.imbuedSelect, self:GetOwnDPSGroupIndex(), self:IsSkillsOnly())
 
 	displayGroup.displayGemList = displayGemList
 
@@ -115,12 +133,22 @@ end
 function GemSelectClass:FilterSupport(gemId, gemData)
 	local showSupportTypes = self.skillsTab.showSupportGemTypes
 	local isLegacyAwakened = (gemData.grantedEffect.legacy and gemData.grantedEffect.plusVersionOf)
+	-- The gem that is already in this socket is always offered, whatever the
+	-- filters would say about it, so that leaving the control cannot lose it
+	if self:IsSocketedGem(gemId) then
+		return true
+	end
 	if gemData.grantedEffect.legacy and not self.skillsTab.showLegacyGems then
 		return false
 	end
 
 	if self.imbuedSelect then
 		return self.sortCache.canSupport[gemId]
+	end
+
+	-- Picking the group's skill: the supports are not candidates for it
+	if gemData.grantedEffect.support and self:IsSkillsOnly() then
+		return false
 	end
 
 	return (not gemData.grantedEffect.support
@@ -236,12 +264,13 @@ function GemSelectClass:UpdateSortCache()
 	-- When set, candidates are ranked by the DPS of the skill they would make in
 	-- this socket group instead of by their effect on the selected main skill
 	local ownGroupIndex = self:GetOwnDPSGroupIndex()
+	local skillsOnly = self:IsSkillsOnly()
 	-- Don't update the cache if no settings have changed that would impact the ordering
 	if sameSortBy and sortCache and sortCache.socketGroup == self.skillsTab.displayGroup and sortCache.gemInstance == self.skillsTab.displayGroup.gemList[self.index]
 		and sortCache.outputRevision == self.skillsTab.build.outputRevision and sortCache.defaultLevel == self.skillsTab.defaultGemLevel
 		and (sortCache.characterLevel == self.skillsTab.build.characterLevel or self.skillsTab.defaultGemLevel ~= "characterLevel")
 		and sortCache.defaultQuality == self.skillsTab.defaultGemQuality and sortCache.sortType == self.skillsTab.sortGemsByDPSField
-		and sortCache.ownGroupIndex == ownGroupIndex
+		and sortCache.ownGroupIndex == ownGroupIndex and sortCache.skillsOnly == skillsOnly
 		and sortCache.considerGemType == self.skillsTab.showSupportGemTypes and sortCache.showLegacyGems == self.skillsTab.showLegacyGems then
 		return
 	end
@@ -272,7 +301,8 @@ function GemSelectClass:UpdateSortCache()
 		-- baseline value and must not be shown as if they had been measured
 		evaluated = { },
 		sortType = self.skillsTab.sortGemsByDPSField,
-		ownGroupIndex = ownGroupIndex
+		ownGroupIndex = ownGroupIndex,
+		skillsOnly = skillsOnly
 	}
 	self.sortCache = sortCache
 
@@ -335,6 +365,9 @@ function GemSelectClass:UpdateSortCache()
 		else
 			ownGroupIndex = nil
 			sortCache.ownGroupIndex = nil
+			-- Measuring the group's own skill is what makes the skills-only ranking
+			-- mean anything, so it goes with it
+			skillsOnly = false
 		end
 	end
 	-- Check for nil because some fields may not be populated, default to 0
@@ -347,8 +380,14 @@ function GemSelectClass:UpdateSortCache()
 	-- normally only the ones with a global effect, but when ranking by this
 	-- group's own DPS every active gem is a candidate for the group's skill
 	local function shouldEvaluate(gemId, gemData)
-		local evaluate = sortCache.canSupport[gemId]
-			or (not gemData.grantedEffect.support and (ownGroupIndex ~= nil or gemData.grantedEffect.hasGlobalEffect))
+		local evaluate
+		if skillsOnly then
+			-- Only the active gems are in the list, so only they are worth a pass
+			evaluate = not gemData.grantedEffect.support
+		else
+			evaluate = sortCache.canSupport[gemId]
+				or (not gemData.grantedEffect.support and (ownGroupIndex ~= nil or gemData.grantedEffect.hasGlobalEffect))
+		end
 		sortCache.evaluated[gemId] = evaluate or nil
 		return evaluate
 	end
@@ -408,13 +447,14 @@ function GemSelectClass:UpdateSortCache()
 			gemIndex = self.index,
 			dpsField = dpsField,
 			ownGroup = ownGroupIndex ~= nil or nil,
+			soloSkill = skillsOnly or nil,
 			defaultLevel = self.skillsTab.defaultGemLevel,
 			defaultQuality = self.skillsTab.defaultGemQuality,
 		}, 2)
 		-- The sort cache gets rebuilt liberally (any validity field changing); an
 		-- identical request already in flight must be reused, not cancelled and
 		-- resubmitted, or the batch never lives long enough to finish
-		local sig = groupIndex .. "/" .. self.index .. "/" .. tostring(dpsField) .. "/" .. tostring(ownGroupIndex) .. "/" .. #gemIds
+		local sig = groupIndex .. "/" .. self.index .. "/" .. tostring(dpsField) .. "/" .. tostring(ownGroupIndex) .. "/" .. tostring(skillsOnly) .. "/" .. #gemIds
 		if self.pendingGemBatch and self.pendingGemSig == sig and not self.pendingGemBatch.cancelled then
 			sortCache.pendingDps = self.pendingGemBatch
 		else
@@ -787,7 +827,9 @@ function GemSelectClass:OnKeyDown(key, doubleClick)
 	if not self.imbuedSelect and key == "LEFTBUTTON" and (cursorY > y and cursorY < (y + height)) then
 		-- no need to constrain right side of the S overlay as that's outside hover
 		if cursorX > (x + width - 18) then
-			self.sortGemsBy = "support" -- only need to change sortBy, code will continue to UpdateSortCache
+			-- The supports-only filter and a list with no supports in it cannot both
+			-- be honoured; leaving it on would open an empty dropdown
+			self.sortGemsBy = not self:IsSkillsOnly() and "support" or nil
 		elseif (cursorX > (x + width - 40) and cursorX < (cursorX + width - 20)) then
 			self.sortGemsBy = "grants_active_skill"
 		else

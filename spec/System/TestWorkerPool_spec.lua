@@ -339,6 +339,95 @@ describe("WorkerPool", function()
 			assert.are.equal(0, #newGroup.gemList)
 		end)
 
+		it("gemDps measures a candidate as the group's only skill when soloSkill is set", function()
+			-- Choosing what a group should run rather than what to link to it: the
+			-- skill it runs now stands aside, so a candidate lands on the group's
+			-- supports alone and reads the same from a free socket as from the
+			-- socket of the skill it would replace
+			addSocketGroup()
+			local group = build.skillsTab.socketGroupList[1]
+			build.skillsTab.displayGroup = group
+			build.skillsTab.sortGemsByOwnDPS = true
+			build.skillsTab.sortGemsSkillsOnly = true
+			build.buildFlag = true
+			runCallback("OnFrame")
+
+			local candidate
+			for gemId, gemData in pairs(build.data.gems) do
+				if gemData.name == "Fireball" then
+					candidate = gemId
+				end
+			end
+			assert.is_not_nil(candidate)
+
+			local calcFunc = build.calcsTab:GetMiscCalculator()
+			local replacing = gemSelectStub(1):CalcOutputWithThisGem(calcFunc, build.data.gems[candidate], false)
+			local alongside = gemSelectStub(#group.gemList + 1):CalcOutputWithThisGem(calcFunc, build.data.gems[candidate], false)
+			local expected = build.skillsTab.ExtractGemDps(replacing, "CombinedDPS")
+			assert.is_true(expected > 0)
+			assert.are.equal(expected, build.skillsTab.ExtractGemDps(alongside, "CombinedDPS"))
+
+			-- And the pool agrees with the dropdown, as for every other job
+			local results = workerJobs.handlers.gemDps({
+				groupIndex = 1,
+				gemIndex = #group.gemList + 1,
+				dpsField = "CombinedDPS",
+				ownGroup = true,
+				soloSkill = true,
+				defaultLevel = build.skillsTab.defaultGemLevel,
+				defaultQuality = build.skillsTab.defaultGemQuality,
+				gemIds = { candidate },
+			})
+			assert.is_nil(results.workerError)
+			assert.are.equal(expected, results[candidate])
+
+			-- Nothing about the group may be left disabled behind the measurement
+			for _, gemInstance in ipairs(group.gemList) do
+				assert.is_true(gemInstance.enabled)
+			end
+		end)
+
+		it("gemDps ignores the socket's own per-effect toggles", function()
+			-- enableGlobal2 is saved as false by a gem that grants one skill, and it
+			-- gates the second granted effect of whatever is staged into that socket.
+			-- A Vaal gem staged there loses its sustainable skill and gets ranked on
+			-- the soul-gated one alone, well above anything it can keep up
+			addSocketGroup()
+			local group = build.skillsTab.socketGroupList[1]
+			build.skillsTab.displayGroup = group
+			build.skillsTab.sortGemsByOwnDPS = true
+			group.gemList[1].enableGlobal2 = false
+			build.buildFlag = true
+			runCallback("OnFrame")
+
+			-- Righteous Fire is one of the skills whose Vaal gem gates it this way,
+			-- and it does damage on a bare build, where an attack would not
+			local vaalGem, plainGem
+			for gemId, gemData in pairs(build.data.gems) do
+				if gemData.name == "Vaal Righteous Fire" then
+					vaalGem = gemId
+				elseif gemData.name == "Righteous Fire" then
+					plainGem = gemId
+				end
+			end
+			assert.is_not_nil(vaalGem)
+			assert.is_not_nil(plainGem)
+
+			local calcFunc = build.calcsTab:GetMiscCalculator()
+			local control = gemSelectStub(1)
+			local function stagedDps(gemId)
+				local output = control:CalcOutputWithThisGem(calcFunc, build.data.gems[gemId], false)
+				return build.skillsTab.ExtractGemDps(output, "CombinedDPS")
+			end
+			-- The Vaal gem's sustainable skill is the same skill the plain gem grants,
+			-- so measured through the same socket the two have to come out equal
+			local plainDps = stagedDps(plainGem)
+			assert.is_true(plainDps > 0)
+			assert.are.equal(plainDps, stagedDps(vaalGem))
+			-- Restored to what the socket had, not to what the candidate needed
+			assert.is_false(group.gemList[1].enableGlobal2)
+		end)
+
 		it("itemPower matches the ItemDBControl sort", function()
 			addSocketGroup()
 			local statEntry
