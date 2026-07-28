@@ -854,6 +854,7 @@ function TradeQueryClass:BuildOptimiserPools()
 					item:BuildModList()
 					t_insert(pool, {
 						slotName = slotName,
+						rowIdx = rowIdx,
 						item = item,
 						price = price,
 						listing = entry,
@@ -933,7 +934,8 @@ local maxPseudoAttribute = 45
 ---@param slotEntries table @ the slots about to be searched
 ---@param constraints table
 ---@return table profiles, table summary
-function TradeQueryClass:OptimiserSearchProfiles(slotEntries, constraints)
+---@param overcapAllowance number? @ how far past the cap is acceptable
+function TradeQueryClass:OptimiserSearchProfiles(slotEntries, constraints, overcapAllowance)
 	local profiles = { { label = "best", requiredMods = nil } }
 	local summary = { }
 	if #slotEntries == 0 then
@@ -964,10 +966,15 @@ function TradeQueryClass:OptimiserSearchProfiles(slotEntries, constraints)
 		end
 	end
 	if resistNeed > 0 then
-		-- Half the shortfall on a single item, not an even split across slots:
-		-- the point is to find the pieces that could carry most of it alone, so
-		-- the others are free to be whatever is best for the objective
-		local ask = m_min(m_ceil(resistNeed / 2), maxPseudoResist)
+		-- Sized so roughly three items cover the shortfall, not one per slot.
+		--
+		-- Two competing pulls. Asking too little of each item means no combination
+		-- reaches the cap. Asking too much wastes affixes: a slot has a fixed
+		-- number of rolls, so every resistance beyond what is needed is a roll not
+		-- spent on the stat being maximised -- which is why overshooting the cap
+		-- costs more than the chaos it wastes. Three-ish carriers leaves the other
+		-- slots free to be whatever is best for the objective.
+		local ask = m_min(m_max(m_ceil((resistNeed + (overcapAllowance or 0)) / 3), 20), maxPseudoResist)
 		t_insert(profiles, {
 			label = "resistance",
 			requiredMods = { { tradeId = pseudoElementalResist, value = ask } },
@@ -1005,17 +1012,34 @@ end
 ---@param settings table @ { objective, budget, includeCorrupted }
 ---@param callback fun(errMsg: string?)
 function TradeQueryClass:SearchSlotForOptimiser(entry, settings, callback)
-	local template
-	for _, stat in ipairs(data.powerStatList) do
-		if stat.stat == settings.objective then
-			template = copyTable(stat)
-			break
+	-- Where a search's mod weights come from: TradeQueryGenerator tries every mod
+	-- that can roll on the slot, measures what each does to these stats through the
+	-- real calculator, and asks the trade site for the highest-scoring items. So a
+	-- mod is only searched for if it moves one of these -- which is why an Energy
+	-- Shield objective never surfaces spell suppression: suppression changes Energy
+	-- Shield by exactly nothing, so it scores zero. Widening the objective (or
+	-- borrowing the Trader's weight list) is what makes such mods visible.
+	local statWeights = { }
+	local seenStat = { }
+	for _, entry in ipairs(settings.statWeights or { }) do
+		if entry.stat and not seenStat[entry.stat] and (entry.weightMult or 0) ~= 0 then
+			-- Resolved against powerStatList rather than trusted as given: the
+			-- generator needs the full entry, including the transform that makes
+			-- lower-is-better stats weigh the right way round
+			for _, stat in ipairs(data.powerStatList) do
+				if stat.stat == entry.stat then
+					local template = copyTable(stat)
+					template.weightMult = entry.weightMult
+					t_insert(statWeights, template)
+					seenStat[entry.stat] = true
+					break
+				end
+			end
 		end
 	end
-	if not template then
-		return callback("Unknown objective stat")
+	if not statWeights[1] then
+		return callback("No usable search weights are set")
 	end
-	template.weightMult = 1
 
 	local generator = self.tradeQueryGenerator
 	if not generator then
@@ -1052,7 +1076,7 @@ function TradeQueryClass:SearchSlotForOptimiser(entry, settings, callback)
 	generator.calcContext = generator.calcContext or { }
 	generator.calcContext.co = nil
 	generator:StartQuery(entry.slot, {
-		statWeights = { template },
+		statWeights = statWeights,
 		influence1 = 1,
 		influence2 = 1,
 		includeMirrored = false,
@@ -1061,6 +1085,7 @@ function TradeQueryClass:SearchSlotForOptimiser(entry, settings, callback)
 		includeTalisman = false,
 		includeAllWEMods = false,
 		jewelType = "Base",
+		weaponCategory = settings.weaponCategory,
 		maxPrice = settings.budget,
 		maxPriceType = "chaos",
 		-- The hard constraints, built into the query itself: without them the
@@ -1075,6 +1100,80 @@ function TradeQueryClass:SearchSlotForOptimiser(entry, settings, callback)
 	end
 end
 
+--- A trade site URL showing one specific solved item.
+---
+--- Built client-side into the "?q=" form the site accepts, so pressing the button
+--- costs no API call and no rate limit. A rare's generated name goes in `term`,
+--- the site's free-text field, which matches it directly -- `name` is a different
+--- field, validated against the known-item table, and rejects rare names. Base
+--- type, seller and exact price narrow it to the single listing.
+---@param cand table @ a candidate from BuildOptimiserPools
+---@return string
+function TradeQueryClass:OptimiserItemURL(cand)
+	local item, listing = cand.item, cand.listing or { }
+	local query = {
+		query = {
+			status = { option = "any" },
+			type = item.baseName,
+			stats = { { type = "and", filters = { } } },
+		},
+		sort = { price = "asc" },
+	}
+	local term = item.title or item.name
+	if term then
+		query.query.term = term:gsub(",%s*" .. item.baseName:gsub("(%W)", "%%%1") .. "$", "")
+	end
+	local tradeFilters = { }
+	if listing.trader then
+		tradeFilters.account = { input = listing.trader }
+	end
+	if listing.amount and listing.currency then
+		tradeFilters.price = { min = listing.amount, max = listing.amount, option = listing.currency }
+	end
+	if next(tradeFilters) then
+		query.query.filters = { trade_filters = { filters = tradeFilters } }
+	end
+	return s_format("https://www.pathofexile.com/trade/search/%s?q=%s",
+		self.pbLeague, urlEncode(dkjson.encode(query)))
+end
+
+--- Point each Trader row at the item the solve chose for it.
+---
+--- Without this the solved set exists only inside the dialog, so closing it
+--- throws the links away and the rows behind still show whatever they showed
+--- before. Selecting the result in the row means the ordinary per-row controls --
+--- import, price, and the button that opens the listing -- act on the solved item.
+---@param result table @ a successful solve
+function TradeQueryClass:SelectOptimiserResultInRows(result)
+	for _, cand in ipairs(result.combo or { }) do
+		local rowIdx, listing = cand.rowIdx, cand.listing
+		if not cand.keep and rowIdx and listing and self.resultTbl[rowIdx] then
+			local rawIndex
+			for index, entry in ipairs(self.resultTbl[rowIdx]) do
+				if entry.id and entry.id == listing.id then
+					rawIndex = index
+					break
+				end
+			end
+			if rawIndex then
+				self.itemIndexTbl[rowIdx] = rawIndex
+				self:SetFetchResultReturn(rowIdx, rawIndex)
+				-- The dropdown indexes the sorted view, not the raw list
+				local dropdown = self.controls["resultDropdown" .. rowIdx]
+				local sorted = self.sortedResultTbl[rowIdx]
+				if dropdown and sorted then
+					for position, entry in ipairs(sorted) do
+						if entry.index == rawIndex then
+							dropdown:SetSel(position, true)
+							break
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
 -- Popup: configure and run the set solve
 function TradeQueryClass:OptimiseSetPopup()
 	local controls = { }
@@ -1086,13 +1185,6 @@ function TradeQueryClass:OptimiseSetPopup()
 	-- Persisted in Settings.xml so the dialog opens the way it was left
 	local opt = main.tradeOptimiser
 	local optimiser = new("TradeSetOptimiser", self.itemsTab)
-	local objectiveList = { }
-	for _, entry in ipairs(data.powerStatList) do
-		if entry.stat and not entry.ignoreForItems then
-			t_insert(objectiveList, entry)
-		end
-	end
-
 	local row = 0
 	local function nextY()
 		row = row + 1
@@ -1124,32 +1216,86 @@ function TradeQueryClass:OptimiseSetPopup()
 		-- Every slot carries its own outcome. A single summary line cannot say
 		-- which slot found nothing, and "no items were found" without a per-slot
 		-- breakdown is not a diagnosis.
-		controls[name .. "n"] = new("LabelControl", { "LEFT", controls[name], "RIGHT" }, { 6, 0, 0, 14 },
+		-- The off-hand is the one slot whose category cannot be read off the build:
+		-- an empty slot looks like a one-handed weapon, so a shield would never be
+		-- searched for. Make the choice visible rather than deciding silently.
+		local countAnchor = controls[name]
+		if entry.slotName == "Weapon 2" then
+			controls.offhandMode = new("DropDownControl", { "LEFT", controls[name], "RIGHT" },
+				{ 6, 0, 110, 18 }, { "Weapons + Shields", "Weapons only", "Shields only" }, function() end)
+			controls.offhandMode:SetSel(opt.offhandMode or 1)
+			controls.offhandMode.tooltipText = [[What to search for in the off-hand.
+
+Path of Building works the category out from whatever is equipped, so an empty off-hand reads as a one-handed weapon and shields are never considered. Searching both and letting the solver choose is usually what you want; it costs one extra search per profile.
+
+Ignored if your main hand holds a two-handed weapon, since nothing can go here.]]
+			countAnchor = controls.offhandMode
+		end
+		controls[name .. "n"] = new("LabelControl", { "LEFT", countAnchor, "RIGHT" }, { 6, 0, 0, 14 },
 			hasResults[entry.slotName] and ("^8" .. #(self.resultTbl[entry.rowIdx] or { }) .. " fetched") or "")
 		entry.countLabel = controls[name .. "n"]
 	end
 	row = row + m_ceil(perColumn * 22 / 26) + 1
 
-	controls.objectiveLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Maximise:")
-	controls.objective = new("DropDownControl", { "LEFT", controls.objectiveLabel, "RIGHT" }, { 8, 0, 220, 20 },
-		objectiveList, function() end)
-	for index, entry in ipairs(objectiveList) do
-		if entry.stat == opt.objective then
-			controls.objective:SetSel(index)
-			break
+	-- What the build is trying to maximise is already a solved question in the
+	-- Trader: a weight editor with saved presets. Reusing it means spell
+	-- suppression, chaos resistance or anything else is expressible here the
+	-- moment it is weighted there, with nothing to keep in sync.
+	local function weightSummary()
+		local list = self.statSortSelectionList or { }
+		if not list[1] then
+			return "^1none set - press Adjust"
 		end
+		local parts = { }
+		for index, entry in ipairs(list) do
+			if index > 4 then
+				t_insert(parts, s_format("+%d more", #list - 4))
+				break
+			end
+			t_insert(parts, s_format("%s x%.2g", entry.label or entry.stat, entry.weightMult or 1))
+		end
+		return "^8" .. table.concat(parts, ", ")
 	end
+	controls.objectiveLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 },
+		function() return "^7Maximise: " .. weightSummary() end)
+	controls.adjustWeights = new("ButtonControl", { "TOPLEFT", controls.objectiveLabel, "TOPLEFT" },
+		{ 560, -3, 150, 20 }, "^7Adjust search weights", function()
+			self:SetStatWeights()
+		end)
+	controls.adjustWeights.tooltipText = [[Opens the Trader's own weight editor, with its saved presets.
+
+These weights drive both halves of the solve: the searches ask the trade site for items that score well on them, and the solver ranks whole sets by them. A search only looks for mods that move the stats it is given -- weight Effective Hit Pool and spell suppression starts mattering, weight Spell Suppression Chance directly and it is searched for by name.]]
 
 	controls.budgetLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Budget (Chaos):")
 	controls.budget = new("EditControl", { "LEFT", controls.budgetLabel, "RIGHT" }, { 8, 0, 100, 20 },
 		tostring(opt.budget), nil, "%D")
 
+	-- Two fields to a row, each anchored off the row counter rather than off its
+	-- neighbour: chaining them sideways ran the last field off the dialog and put
+	-- the next row on top of the one after it
 	controls.resistLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Resistances at least:")
 	controls.resist = new("EditControl", { "LEFT", controls.resistLabel, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.resist), nil, "%D")
-	controls.attrLabel = new("LabelControl", { "LEFT", controls.resist, "RIGHT" }, { 16, 0, 0, 16 }, "^7Attribute headroom:")
+	controls.overcapLabel = new("LabelControl", { "LEFT", controls.resist, "RIGHT" }, { 24, 0, 0, 16 }, "^7Allowed overcap:")
+	controls.overcap = new("EditControl", { "LEFT", controls.overcapLabel, "RIGHT" }, { 8, 0, 60, 20 },
+		tostring(opt.maxOvercap), nil, "%D")
+
+	controls.chaosLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 },
+		"^7Chaos resistance at least:")
+	controls.chaos = new("EditControl", { "LEFT", controls.chaosLabel, "RIGHT" }, { 8, 0, 60, 20 },
+		tostring(opt.chaosFloor or 0), nil, "%D")
+	controls.attrLabel = new("LabelControl", { "LEFT", controls.chaos, "RIGHT" }, { 24, 0, 0, 16 }, "^7Attribute headroom:")
 	controls.attr = new("EditControl", { "LEFT", controls.attrLabel, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.attrMargin), nil, "%D")
+	controls.chaos.tooltipText = [[Minimum chaos resistance. 0 means no requirement.
+
+Chaos resistance is not capped the way the elements are, and demanding it is expensive. If the aim is survivability rather than raw Energy Shield, maximising Effective Hit Pool is usually the better lever: it values chaos resistance, elemental resistance and the pool itself together, and stops valuing a resistance once it is capped.]]
+
+	controls.overcap.tooltipText = [[How far above the cap a resistance may go.
+
+Resistance past the cap does nothing, so without a ceiling the solver will happily buy 250% fire resistance whenever those items also scored well -- budget that should have gone on the stat being maximised.
+
+Set 0 to insist on landing exactly on the cap, which is usually impossible since resistance comes in whole rolls. If nothing fits the allowance, the closest set is used and the result says by how much it overshot.]]
 	controls.attr.tooltipText = "Requirements are read from each set as it is measured, because gear with reduced Attribute Requirements lowers the requirement rather than raising the attribute. This is how much room to leave above whatever the requirement turns out to be."
 
 	controls.swapCheck = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY(), 20, 20 },
@@ -1185,26 +1331,49 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 			return
 		end
 		self.optimiserResult = result
+		pcall(function() self:SelectOptimiserResultInRows(result) end)
 		local gain = result.score - result.baseScore
-		controls.status.label = s_format("^7%s ^8%.0f ^7-> ^8%.0f ^7(%+.0f)   ^7cost ^8%.0f Chaos^7%s   ^8measured %d of %d",
-			controls.objective:GetSelValueByKey("label") or result.objective,
-			result.baseScore, result.score, gain, result.cost,
-			result.swaps > 0 and s_format("  ^7+ %d swap craft%s", result.swaps, result.swaps == 1 and "" or "s") or "",
+		controls.status.label = s_format("^7Weighted score ^8%.3f ^7-> ^8%.3f ^7(%+.1f%%)   ^7cost ^8%.0f Chaos^7%s   ^8measured %d of %d",
+			result.baseScore, result.score,
+			result.baseScore ~= 0 and (gain / m_abs(result.baseScore) * 100) or 0, result.cost,
+			(result.swaps > 0 and s_format("  ^7+ %d swap craft%s", result.swaps, result.swaps == 1 and "" or "s") or "")
+				.. (result.overcapRelaxed and s_format("  ^1overcaps by %.0f", result.overcap or 0)
+					or (result.overcap and result.overcap > 0 and s_format("  ^8overcap %.0f", result.overcap) or "")),
 			result.measured, result.shortlisted)
 		local anchor = controls.solve
 		for _, cand in ipairs(result.combo) do
 			if not cand.keep then
 				local name = "res" .. #resultRows
 				controls[name] = new("LabelControl", { "TOPLEFT", anchor, "BOTTOMLEFT" },
-					{ 0, anchor == controls.solve and 14 or 6, 0, 16 },
+					{ 0, anchor == controls.solve and 16 or 8, 0, 16 },
 					s_format("^7%-14s ^8%s", cand.slotName, cand.label))
 				anchor = controls[name]
 				t_insert(resultRows, name)
+				-- A solved set is no use without a way to actually buy it
+				local openName = name .. "open"
+				controls[openName] = new("ButtonControl", { "TOPLEFT", controls[name], "TOPLEFT" },
+					{ 470, -3, 90, 18 }, "Trade page", function()
+						local url = self:OptimiserItemURL(cand)
+						Copy(url)
+						OpenURL(url)
+					end)
+				controls[openName].tooltipText = "Opens this listing on the trade site, and copies the link to the clipboard."
+				t_insert(resultRows, openName)
+				local whisperName = name .. "whisper"
+				controls[whisperName] = new("ButtonControl", { "TOPLEFT", controls[openName], "TOPRIGHT" },
+					{ 6, 0, 80, 18 }, "Whisper", function()
+						Copy((cand.listing or { }).whisper or "")
+					end)
+				controls[whisperName].enabled = function()
+					return (cand.listing or { }).whisper ~= nil
+				end
+				controls[whisperName].tooltipText = "Copies the purchase whisper for this listing to the clipboard."
+				t_insert(resultRows, whisperName)
 			end
 		end
-		local resistLine = s_format("^8fire %.0f  cold %.0f  lightning %.0f      Str %.0f/%.0f  Dex %.0f/%.0f  Int %.0f/%.0f",
+		local resistLine = s_format("^8fire %.0f  cold %.0f  lightning %.0f  chaos %.0f      Str %.0f/%.0f  Dex %.0f/%.0f  Int %.0f/%.0f",
 			result.stats.FireResistTotal or 0, result.stats.ColdResistTotal or 0,
-			result.stats.LightningResistTotal or 0,
+			result.stats.LightningResistTotal or 0, result.stats.ChaosResistTotal or 0,
 			result.stats.Str or 0, result.stats.ReqStr or 0,
 			result.stats.Dex or 0, result.stats.ReqDex or 0,
 			result.stats.Int or 0, result.stats.ReqInt or 0)
@@ -1220,19 +1389,21 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 	--- Capture the dialog into the persisted settings, and write them to disk so
 	--- the next session opens with the same choices.
 	local function readSettings()
-		opt.objective = controls.objective:GetSelValueByKey("stat")
 		opt.budget = tonumber(controls.budget.buf) or opt.budget
 		opt.resist = tonumber(controls.resist.buf) or opt.resist
 		opt.attrMargin = tonumber(controls.attr.buf) or opt.attrMargin
 		opt.swaps = controls.swapCheck.state
 		opt.swapCost = tonumber(controls.swapCost.buf) or opt.swapCost
+		opt.maxOvercap = tonumber(controls.overcap.buf) or opt.maxOvercap
+		opt.chaosFloor = tonumber(controls.chaos.buf) or opt.chaosFloor
+		opt.offhandMode = controls.offhandMode and controls.offhandMode.selIndex or opt.offhandMode
 		opt.refetch = controls.refetch.state
 		opt.slots = { }
 		for _, entry in ipairs(slotEntries) do
 			opt.slots[entry.slotName] = entry.control.state
 		end
 		main:SaveSettings()
-		return { objective = opt.objective, budget = opt.budget }
+		return { statWeights = self.statSortSelectionList, budget = opt.budget }
 	end
 
 	local function refreshPools()
@@ -1247,7 +1418,10 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 		if not slotNames[1] then
 			local why = "^1Nothing to solve with. "
 			if searchState.errors and searchState.errors[1] then
-				why = why .. "^1" .. table.concat(searchState.errors, "   ")
+				local first = searchState.errors[1]
+				if #first > 90 then first = first:sub(1, 87) .. "..." end
+				why = why .. s_format("^1%s%s", first,
+					#searchState.errors > 1 and s_format(" (+%d more)", #searchState.errors - 1) or "")
 			elseif skipped > 0 then
 				why = why .. s_format("^1All %d listing(s) were priced in a currency with no known rate - press \"Get Currency Conversion Rates\".", skipped)
 			else
@@ -1260,10 +1434,12 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 			controls.status.label = s_format("^8%d listing(s) skipped: no conversion rate for that currency.", skipped)
 		end
 		local settings = {
-			objective = opt.objective,
+			statWeights = self.statSortSelectionList,
 			budget = opt.budget,
-			constraints = optimiser:DefaultConstraints(opt.resist, opt.attrMargin),
+			constraints = optimiser:DefaultConstraints(opt.resist, opt.attrMargin, opt.chaosFloor),
 			resistTarget = opt.swaps and opt.resist or nil,
+			overcapTarget = opt.resist,
+			maxOvercap = opt.maxOvercap,
 			resistSwapCost = opt.swaps and opt.swapCost or 0,
 			maxResistSwaps = opt.swaps and 3 or 0,
 		}
@@ -1303,22 +1479,42 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 					end
 				end
 			end
-			local constraints = optimiser:DefaultConstraints(opt.resist, opt.attrMargin)
-			local profiles, summary = self:OptimiserSearchProfiles(toSearch, constraints)
+			local constraints = optimiser:DefaultConstraints(opt.resist, opt.attrMargin, opt.chaosFloor)
+			local profiles, summary = self:OptimiserSearchProfiles(toSearch, constraints, opt.maxOvercap)
 			-- Each slot is searched once per profile and the results pooled, so a
 			-- slot can end up with resistance-heavy items, pure objective items, or
 			-- both, and the solver picks which slot carries what
 			for _, entry in ipairs(toSearch) do
-				for profileIdx, profile in ipairs(profiles) do
-					t_insert(searchState.queue, { entry = entry, profile = profile, first = profileIdx == 1 })
+				-- An empty off-hand reads as a one-handed weapon, so a shield would
+				-- never be considered. Search both and let the solver decide, the
+				-- same way it decides which slot carries the resistance.
+				local categories = { false }
+				if entry.slotName == "Weapon 2" and controls.offhandMode then
+					local mode = controls.offhandMode.selIndex or 1
+					if mode == 2 then
+						categories = { "1HWeapon" }
+					elseif mode == 3 then
+						categories = { "Shield" }
+					else
+						categories = { "1HWeapon", "Shield" }
+					end
+				end
+				for _, category in ipairs(categories) do
+					for profileIdx, profile in ipairs(profiles) do
+						t_insert(searchState.queue, {
+							entry = entry, profile = profile,
+							weaponCategory = category or nil,
+							first = profileIdx == 1 and categories[1] == category,
+						})
+					end
 				end
 			end
 			searchState.total, searchState.done = #searchState.queue, 0
-			searchState.settings = { objective = opt.objective, budget = opt.budget }
+			searchState.settings = { statWeights = self.statSortSelectionList, budget = opt.budget }
 			controls.demands.label = summary[1]
 				and s_format("^7Searching each slot %d ways: ^8best %s, or carrying %s",
-					#profiles, tostring(opt.objective), table.concat(summary, " / "))
-				or "^8Nothing to make up; searching on " .. tostring(opt.objective) .. " alone."
+					#profiles, "the configured weights", table.concat(summary, " / "))
+				or "^8Nothing to make up; searching on the configured weights alone."
 			if searchState.total == 0 then
 				startSolve()
 			else
@@ -1367,21 +1563,32 @@ Searches run one slot at a time, because the query generator handles one at a ti
 		main:ClosePopup()
 	end)
 
+	-- Reopening should show the last solve, links and all, rather than a blank
+	-- dialog that makes it look as though nothing was ever found
+	if self.optimiserResult and self.optimiserResult.ok then
+		local ok = pcall(showResult, self.optimiserResult)
+		if not ok then
+			self.optimiserResult = nil
+		end
+	end
+
 	main.onFrameFuncs["TradeSetOptimiser"] = function()
 		-- One slot search at a time, then the solve
 		if not searchState.active and searchState.queue[1] then
 			local job = t_remove(searchState.queue, 1)
 			local entry, profile = job.entry, job.profile
 			searchState.active = job
-			controls.status.label = s_format("^7Searching %s ^8(%s)  ^8%d / %d",
-				entry.slotName, profile.label, searchState.done + 1, searchState.total)
+			controls.status.label = s_format("^7Searching %s ^8(%s%s)  ^8%d / %d",
+				entry.slotName, job.weaponCategory and (job.weaponCategory .. ", ") or "",
+				profile.label, searchState.done + 1, searchState.total)
 			if entry.countLabel then
 				entry.countLabel.label = "^7searching " .. profile.label .. "..."
 			end
 			local settings = {
-				objective = searchState.settings.objective,
+				statWeights = searchState.settings.statWeights,
 				budget = searchState.settings.budget,
 				requiredMods = profile.requiredMods,
+				weaponCategory = job.weaponCategory,
 			}
 			self:SearchSlotForOptimiser(entry, settings, function(errMsg, items)
 				searchState.done = searchState.done + 1
@@ -1421,8 +1628,27 @@ Searches run one slot at a time, because the query generator handles one at a ti
 				if not searchState.queue[1] then
 					refreshPools()
 					if searchState.errors[1] then
-						controls.status.label = "^7Searched " .. searchState.done .. " slot(s).  ^1" ..
-							table.concat(searchState.errors, "   ")
+						-- Every slot failing the same way produces the same message N
+						-- times, which ran off the side of the window and buried the
+						-- one thing worth reading. Distinct reasons only, and capped.
+						local seenReason, reasons = { }, { }
+						for _, entry in ipairs(searchState.errors) do
+							local reason = entry:match(":%s*(.+)$") or entry
+							if not seenReason[reason] then
+								seenReason[reason] = true
+								t_insert(reasons, reason)
+							end
+						end
+						local shown = reasons[1]
+						if #reasons > 1 then
+							shown = shown .. s_format(" (and %d other reason%s)", #reasons - 1,
+								#reasons == 2 and "" or "s")
+						end
+						if #shown > 100 then
+							shown = shown:sub(1, 97) .. "..."
+						end
+						controls.status.label = s_format("^7%d of %d search(es) failed: ^1%s",
+							#searchState.errors, searchState.total, shown)
 					end
 					if searchState.thenSolve then
 						searchState.thenSolve = false
@@ -1448,7 +1674,7 @@ Searches run one slot at a time, because the query generator handles one at a ti
 	-- result row per slot plus the summary line
 	-- Reserving a result row per slot makes the dialog taller than a screen once
 	-- flasks and abyssal sockets are counted; nobody replaces that many at once
-	local popupHeight = 210 + m_ceil(#slotEntries / 2) * 22 + 130 + (m_min(#slotEntries, 9) + 2) * 22
+	local popupHeight = 210 + m_ceil(#slotEntries / 2) * 22 + 156 + (m_min(#slotEntries, 9) + 2) * 22
 	main:OpenPopup(820, popupHeight, "Solve Gear Set", controls)
 end
 

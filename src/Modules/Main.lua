@@ -127,6 +127,9 @@ function main:Init()
 		attrMargin = 10,
 		swaps = false,
 		swapCost = 10,
+		maxOvercap = 20,
+		chaosFloor = 0,
+		offhandMode = 1,
 		refetch = true,
 		slots = { },
 	}
@@ -699,6 +702,9 @@ function main:LoadSettings(ignoreBuild)
 				opt.resist = tonumber(node.attrib.tradeOptimiserResist) or opt.resist
 				opt.attrMargin = tonumber(node.attrib.tradeOptimiserAttrMargin) or opt.attrMargin
 				opt.swapCost = tonumber(node.attrib.tradeOptimiserSwapCost) or opt.swapCost
+				opt.maxOvercap = tonumber(node.attrib.tradeOptimiserMaxOvercap) or opt.maxOvercap
+				opt.chaosFloor = tonumber(node.attrib.tradeOptimiserChaosFloor) or opt.chaosFloor
+				opt.offhandMode = tonumber(node.attrib.tradeOptimiserOffhandMode) or opt.offhandMode
 				if node.attrib.tradeOptimiserSwaps then
 					opt.swaps = node.attrib.tradeOptimiserSwaps == "true"
 				end
@@ -885,6 +891,9 @@ function main:SaveSettings()
 		tradeOptimiserAttrMargin = tostring((self.tradeOptimiser or { }).attrMargin),
 		tradeOptimiserSwaps = tostring((self.tradeOptimiser or { }).swaps),
 		tradeOptimiserSwapCost = tostring((self.tradeOptimiser or { }).swapCost),
+		tradeOptimiserMaxOvercap = tostring((self.tradeOptimiser or { }).maxOvercap),
+		tradeOptimiserChaosFloor = tostring((self.tradeOptimiser or { }).chaosFloor),
+		tradeOptimiserOffhandMode = tostring((self.tradeOptimiser or { }).offhandMode),
 		tradeOptimiserRefetch = tostring((self.tradeOptimiser or { }).refetch),
 		tradeOptimiserSlots = (function()
 			local names = { }

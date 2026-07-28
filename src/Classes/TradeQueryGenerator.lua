@@ -690,6 +690,19 @@ function TradeQueryGeneratorClass:StartQuery(slot, options)
 	else
 		itemCategoryQueryStr, itemCategory = tradeHelpers.getTradeCategory(slot.slotName, existingItem)
 
+		-- Weapon slots: the category is inferred from whatever is equipped, so an
+		-- empty off-hand always reads as a one-handed weapon and a shield is never
+		-- searched for. Let the caller say which it wants, as jewel slots already do.
+		if options.weaponCategory and slot.slotName:find("^Weapon %d") then
+			if options.weaponCategory == "Shield" then
+				itemCategoryQueryStr, itemCategory = "armour.shield", "Shield"
+			elseif options.weaponCategory == "1HWeapon" then
+				itemCategoryQueryStr, itemCategory = "weapon.one", "1HWeapon"
+			elseif options.weaponCategory == "2HWeapon" then
+				itemCategoryQueryStr, itemCategory = "weapon.two", "2HWeapon"
+			end
+		end
+
 		-- Generic Jewel slot: caller selects the jewel subtype.
 		if slot.slotName:find("Jewel") ~= nil and not slot.slotName:find("Abyssal") then
 			itemCategory = options.jewelType .. "Jewel"

@@ -54,10 +54,11 @@ end)
 --- requirement met with a little room.
 ---@param resistCap number
 ---@param attrMargin number
-function TradeSetOptimiserClass:DefaultConstraints(resistCap, attrMargin)
+---@param chaosFloor number? @ optional minimum chaos resistance; nil or 0 to ignore
+function TradeSetOptimiserClass:DefaultConstraints(resistCap, attrMargin, chaosFloor)
 	resistCap = resistCap or 75
 	attrMargin = attrMargin or 10
-	return {
+	local constraints = {
 		{ stat = "FireResistTotal", min = resistCap },
 		{ stat = "ColdResistTotal", min = resistCap },
 		{ stat = "LightningResistTotal", min = resistCap },
@@ -65,6 +66,14 @@ function TradeSetOptimiserClass:DefaultConstraints(resistCap, attrMargin)
 		{ stat = "Dex", atLeast = "ReqDex", margin = attrMargin },
 		{ stat = "Int", atLeast = "ReqInt", margin = attrMargin },
 	}
+	-- Chaos resistance is not capped the way the elements are and is expensive, so
+	-- it is a floor only when asked for. Note that if the aim is survivability
+	-- rather than raw Energy Shield, maximising Effective Hit Pool values chaos
+	-- resistance on its own, without needing a floor at all.
+	if chaosFloor and chaosFloor ~= 0 then
+		t_insert(constraints, { stat = "ChaosResistTotal", min = chaosFloor })
+	end
+	return constraints
 end
 
 local function constraintFloor(constraint, stats)
@@ -82,6 +91,40 @@ end
 -- Candidate prep --
 --------------------
 
+--- Score an outcome against the stat weights the Trader is configured with.
+---
+--- Same weighting as TradeQueryGenerator.WeightedRatioOutputs, which is what the
+--- Trader sorts its own results by, and deliberately the same stat weights: what
+--- a build is trying to maximise is already a solved, user-editable question in
+--- Path of Building, with a weight editor and saved presets behind it.
+---
+--- One difference, and it matters. That function clamps each ratio to
+--- data.misc.maxStatIncrease, which is 2. That is right where it is used --
+--- weighing one modifier at a time, where nothing doubles a stat -- but wrong
+--- for ranking whole sets, where doubling is routine. Clamped, a set worth 2.5x
+--- and one worth 6x score identically and the solver picks between them on
+--- price. So the ratio is left uncapped here.
+function TradeSetOptimiserClass:Score(output)
+	local total = 0
+	for _, weight in ipairs(self.statWeights) do
+		local base = data.powerStatList.GetFromOutput(self.baseOutput, weight, true)
+		local new = data.powerStatList.GetFromOutput(output, weight, true)
+		local ratio
+		if base == m_huge then
+			ratio = 0
+		elseif new == m_huge then
+			ratio = m_huge
+		else
+			ratio = new / ((base ~= 0) and base or 1)
+		end
+		if weight.transform then
+			ratio = weight.transform(ratio)
+		end
+		total = total + ratio * (weight.weightMult or 1)
+	end
+	return total
+end
+
 --- Measure what each candidate does on its own.
 --- The result is only used for ranking and bounding, never for a verdict.
 ---@param pools table @ slotName -> array of { item = Item, price = number, ... }
@@ -96,6 +139,8 @@ function TradeSetOptimiserClass:MeasureCandidates(pools, statNames)
 			for _, stat in ipairs(statNames) do
 				cand.deltas[stat] = (output[stat] or 0) - (baseOutput[stat] or 0)
 			end
+			-- The scalar the shortlist ranks and bounds on
+			cand.deltas.__score = self:Score(output)
 		end
 	end
 	return baseOutput
@@ -134,9 +179,9 @@ local function paretoFront(pool, dims)
 end
 
 --- Reduce every slot to a shortlist, with the option of changing nothing there.
-function TradeSetOptimiserClass:PrepareOptions(pools, objective, constraints, perSlot)
-	local dims = { objective }
-	local seen = { [objective] = true }
+function TradeSetOptimiserClass:PrepareOptions(pools, constraints, perSlot)
+	local dims = { "__score" }
+	local seen = { __score = true }
 	for _, constraint in ipairs(constraints) do
 		if not seen[constraint.stat] then
 			seen[constraint.stat] = true
@@ -147,7 +192,7 @@ function TradeSetOptimiserClass:PrepareOptions(pools, objective, constraints, pe
 	for slotName, pool in pairs(pools) do
 		local front = paretoFront(pool, dims)
 		t_sort(front, function(a, b)
-			return (a.deltas[objective] or 0) > (b.deltas[objective] or 0)
+			return (a.deltas.__score or 0) > (b.deltas.__score or 0)
 		end)
 		local shortlist = { { slotName = slotName, keep = true, price = 0, deltas = { } } }
 		for i = 1, m_min(#front, perSlot) do
@@ -165,7 +210,7 @@ end
 --- Best-first shortlist of combinations under the linear model.
 --- Every bound here is admissible: it can only discard sets that could not have
 --- won, so the shortlist is the true linear top-N.
-function TradeSetOptimiserClass:Shortlist(options, slotOrder, budget, objective, constraints, limit, onProgress)
+function TradeSetOptimiserClass:Shortlist(options, slotOrder, budget, constraints, limit, onProgress)
 	local perSlot = { }
 	for i, slotName in ipairs(slotOrder) do
 		perSlot[i] = options[slotName]
@@ -184,7 +229,7 @@ function TradeSetOptimiserClass:Shortlist(options, slotOrder, budget, objective,
 		local pool = perSlot[i]
 		local bo, mc = -m_huge, m_huge
 		for _, cand in ipairs(pool) do
-			bo = m_max(bo, cand.deltas[objective] or 0)
+			bo = m_max(bo, cand.deltas.__score or 0)
 			mc = m_min(mc, cand.price)
 		end
 		bestObj[i] = bestObj[i + 1] + bo
@@ -238,7 +283,7 @@ function TradeSetOptimiserClass:Shortlist(options, slotOrder, budget, objective,
 				for _, constraint in ipairs(constraints) do
 					totals[constraint.stat] = totals[constraint.stat] + (cand.deltas[constraint.stat] or 0)
 				end
-				recurse(i + 1, newCost, obj + (cand.deltas[objective] or 0))
+				recurse(i + 1, newCost, obj + (cand.deltas.__score or 0))
 				for _, constraint in ipairs(constraints) do
 					totals[constraint.stat] = totals[constraint.stat] - (cand.deltas[constraint.stat] or 0)
 				end
@@ -289,12 +334,42 @@ end
 -- Solving  --
 --------------
 
+--- How far past the cap the worst resistance sits.
+--- Resistance above the cap does nothing, so a set that overshoots has spent
+--- budget on a stat with no effect -- budget that could have bought the objective.
+local function worstOvercap(stats, target)
+	local worst = 0
+	for _, stat in ipairs(RESIST_STATS) do
+		worst = m_max(worst, (stats[stat] or 0) - target)
+	end
+	return worst
+end
+
 --- Measure a shortlist and keep the best set that satisfies every constraint.
-function TradeSetOptimiserClass:Measure(combos, objective, constraints, budget, options, onProgress)
+function TradeSetOptimiserClass:Measure(combos, constraints, budget, options, onProgress)
 	local calcFunc = self.build.calcsTab:GetMiscCalculator()
 	local best, rejected, measured = nil, { }, 0
 	local resistTarget = options.resistTarget
 	local swapCost, maxSwaps = options.resistSwapCost or 0, options.maxResistSwaps or 0
+	-- Cap resistance from above as well as below. Without this the constraint is a
+	-- floor with nothing above it, so overshooting is free and the solver happily
+	-- buys 250% fire resistance because those items also happened to be good.
+	local capTarget, allowance = options.overcapTarget, options.maxOvercap
+	-- Resistance comes in whole rolls, so a set landing within a tight allowance
+	-- may not exist. Falling back to "best objective among everything that
+	-- overshoots" is no fallback at all: overshooting is unpenalised there, so it
+	-- picks the most resistance-stacked set in the shortlist. Instead, keep the
+	-- best set in each overshoot tier and answer from the tightest tier that has
+	-- one, so relaxing gives up as little as it has to.
+	local tiers = nil
+	if capTarget and allowance then
+		tiers = { }
+		local step = m_max(allowance, 5)
+		for i = 1, 5 do
+			t_insert(tiers, { limit = allowance + step * (i - 1), best = nil })
+		end
+		t_insert(tiers, { limit = m_huge, best = nil })
+	end
 
 	for index, combo in ipairs(combos) do
 		local repItems, cost = { }, 0
@@ -335,9 +410,25 @@ function TradeSetOptimiserClass:Measure(combos, objective, constraints, budget, 
 				if total > budget then
 					rejected.budget = (rejected.budget or 0) + 1
 				else
-					local score = stats[objective] or 0
-					if not best or score > best.score or (score == best.score and total < best.cost) then
-						best = { score = score, cost = total, swaps = swaps, combo = combo, stats = stats }
+					local score = self:Score(stats)
+					local over = capTarget and worstOvercap(stats, capTarget) or 0
+					local entry = { score = score, cost = total, swaps = swaps, combo = combo,
+						stats = stats, overcap = over }
+					local function better(current)
+						return not current or score > current.score
+							or (score == current.score and total < current.cost)
+					end
+					if not tiers then
+						if better(best) then best = entry end
+					elseif over <= allowance then
+						if better(best) then best = entry end
+					else
+						rejected.overcap = (rejected.overcap or 0) + 1
+						for _, tier in ipairs(tiers) do
+							if over <= tier.limit and better(tier.best) then
+								tier.best = entry
+							end
+						end
 					end
 				end
 			end
@@ -347,6 +438,14 @@ function TradeSetOptimiserClass:Measure(combos, objective, constraints, budget, 
 			coroutine.yield()
 		end
 	end
+	if not best and tiers then
+		for _, tier in ipairs(tiers) do
+			if tier.best then
+				tier.best.overcapRelaxed = true
+				return tier.best, measured, rejected
+			end
+		end
+	end
 	return best, measured, rejected
 end
 
@@ -354,20 +453,39 @@ end
 ---@param pools table @ slotName -> array of { item = Item, price = number, listing = table }
 ---@param settings table
 function TradeSetOptimiserClass:Solve(pools, settings, onProgress)
-	local objective = settings.objective or "EnergyShield"
+	-- Resolved against powerStatList rather than used as given: the saved weight
+	-- list carries stat and multiplier, but the transform that makes
+	-- lower-is-better stats weigh the right way round lives on the stat entry
+	self.statWeights = { }
+	for _, entry in ipairs(settings.statWeights or { }) do
+		if entry.stat and (entry.weightMult or 0) ~= 0 then
+			for _, stat in ipairs(data.powerStatList) do
+				if stat.stat == entry.stat then
+					local resolved = copyTable(stat)
+					resolved.weightMult = entry.weightMult
+					t_insert(self.statWeights, resolved)
+					break
+				end
+			end
+		end
+	end
+	if not self.statWeights[1] then
+		return { ok = false, reason = "No search weights are set. Use \"Adjust search weights\" to say what this build is trying to maximise." }
+	end
 	local constraints = settings.constraints or self:DefaultConstraints(75, 10)
 	local budget = settings.budget or m_huge
 	local perSlot = settings.perSlot or 16
 	local shortlistSize = settings.shortlist or 3000
 
-	local statNames = { objective }
-	local seen = { [objective] = true }
+	local statNames = { }
+	local seen = { }
 	local function want(stat)
 		if stat and not seen[stat] then
 			seen[stat] = true
 			t_insert(statNames, stat)
 		end
 	end
+	for _, weight in ipairs(self.statWeights) do want(weight.stat) end
 	for _, constraint in ipairs(constraints) do
 		want(constraint.stat)
 		want(constraint.atLeast)
@@ -378,14 +496,14 @@ function TradeSetOptimiserClass:Solve(pools, settings, onProgress)
 	self:MeasureCandidates(pools, statNames)
 	coroutine.yield()
 
-	local options = self:PrepareOptions(pools, objective, constraints, perSlot)
+	local options = self:PrepareOptions(pools, constraints, perSlot)
 	local slotOrder = { }
 	for slotName in pairs(options) do t_insert(slotOrder, slotName) end
 	t_sort(slotOrder, function(a, b) return #options[a] > #options[b] end)
 
 	-- Hold back enough budget that a set needing the bench can still afford it
 	local craftReserve = (settings.resistSwapCost or 0) * (settings.maxResistSwaps or 0)
-	local combos = self:Shortlist(options, slotOrder, budget - craftReserve, objective,
+	local combos = self:Shortlist(options, slotOrder, budget - craftReserve,
 		constraints, shortlistSize, onProgress)
 	if #combos == 0 then
 		-- The shortlist is empty when the bounds proved no assignment could both
@@ -395,18 +513,23 @@ function TradeSetOptimiserClass:Solve(pools, settings, onProgress)
 			reason = "No combination can fit the budget and still meet the requirements. Raise the budget, lower the requirements, or fetch more items." }
 	end
 
-	local best, measured, rejected = self:Measure(combos, objective, constraints, budget, settings, onProgress)
+	settings.overcapTarget = settings.overcapTarget or settings.resistTarget
+	local best, measured, rejected = self:Measure(combos, constraints, budget, settings, onProgress)
 	if not best then
 		return { ok = false, reason = "Every set that fits the budget failed a requirement.",
 			measured = measured, rejected = rejected }
 	end
 	return {
 		ok = true,
-		objective = objective,
+		-- The score is a weighted ratio against the current build, so 1.0 is "no
+		-- better than what is equipped" and it has no unit of its own
 		score = best.score,
-		baseScore = self.baseOutput[objective] or 0,
+		baseScore = self:Score(self.baseOutput),
+		statWeights = self.statWeights,
 		cost = best.cost,
 		swaps = best.swaps,
+		overcap = best.overcap,
+		overcapRelaxed = best.overcapRelaxed,
 		stats = best.stats,
 		combo = best.combo,
 		measured = measured,
