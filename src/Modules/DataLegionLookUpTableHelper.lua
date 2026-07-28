@@ -50,9 +50,12 @@ local function loadJewelFile(jewelTypeName)
 			jewelData = uncompressedFile:read("*a")
 			uncompressedFile:close()
 		end
-		if jewelData then
+		-- an empty read is a truncated cache (e.g. two instances writing it at once), not valid data;
+		-- fall through to the compressed file rather than handing back a zero-length LUT
+		if jewelData and #jewelData > 0 then
 			return jewelData
 		end
+		jewelData = nil
 	end
 
 	ConPrintf("Failed to load " .. scriptPath .. jewelTypeName .. ".bin, or data is out of date, falling back to compressed file")
@@ -64,8 +67,9 @@ local function loadJewelFile(jewelTypeName)
 		jewelData = Inflate(splitFile)
 	end
 
-	if jewelData == nil then
+	if jewelData == nil or #jewelData == 0 then
 		ConPrintf("Failed to load either file: " .. jewelTypeName .. ".zip, " .. jewelTypeName .. ".bin")
+		return nil
 	else
 		local uncompressedFile = io.open(scriptPath .. jewelTypeName .. ".bin", "wb+")
 		if uncompressedFile then

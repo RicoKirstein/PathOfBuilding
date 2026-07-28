@@ -208,6 +208,10 @@ function ItemDBClass:BuildSortOrder()
 		if not stat.ignoreForItems then
 			t_insert(self.sortDropList, {
 				label="Sort by "..stat.label,
+				-- `label` is for display and carries the "Sort by " prefix; keep the
+				-- bare label too, since that is what identifies the entry in
+				-- data.powerStatList when a worker has to find it again
+				statLabel=stat.label,
 				sortMode=stat.itemField or stat.stat,
 				itemField=stat.itemField,
 				stat=stat.stat,
@@ -263,7 +267,7 @@ function ItemDBClass:ListBuilder()
 					end
 				end
 				if any then
-					t_insert(shards, { stat = self.sortDetail.stat, statLabel = self.sortDetail.label, slots = slots, items = slice })
+					t_insert(shards, { stat = self.sortDetail.stat, statLabel = self.sortDetail.statLabel, slots = slots, items = slice })
 				end
 			end
 			local batchDone = false

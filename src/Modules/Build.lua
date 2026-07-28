@@ -1145,6 +1145,29 @@ function buildMode:UpdateSecondaryAscendancyDropdown(forceListUpdate)
 	secondaryDrop.enabled = self.spec ~= nil and (self.secondaryAscendDropEntryCount or 1) > 1
 end
 
+-- Rebuilds the calculation output if an edit is pending. Normally driven once per
+-- frame from OnFrame, but callers that mutate the build outside the frame loop
+-- (see Modules/McpServer) call it directly when they need the fresh output before
+-- the next frame runs.
+function buildMode:PerformRecalc()
+	if not self.buildFlag then
+		return false
+	end
+	-- Wipe Global Cache
+	wipeGlobalCache()
+
+	-- Rebuild calculation output tables
+	self.outputRevision = self.outputRevision + 1
+	self.buildFlag = false
+	local recalcStart = GetTime()
+	self.calcsTab:BuildOutput()
+	self:RefreshStatList()
+	if main.workerPool then
+		main.workerPool:LogMainRecalc(GetTime() - recalcStart)
+	end
+	return true
+end
+
 function buildMode:OnFrame(inputEvents)
 	-- Stop at drawing the background if the loaded build needs to be converted
 	if not self.targetVersion then
@@ -1243,20 +1266,7 @@ function buildMode:OnFrame(inputEvents)
 	self.controls.ascendDrop:CheckDroppedWidth(true)
 	self:UpdateSecondaryAscendancyDropdown()
 
-	if self.buildFlag then
-		-- Wipe Global Cache
-		wipeGlobalCache()
-
-		-- Rebuild calculation output tables
-		self.outputRevision = self.outputRevision + 1
-		self.buildFlag = false
-		local recalcStart = GetTime()
-		self.calcsTab:BuildOutput()
-		self:RefreshStatList()
-		if main.workerPool then
-			main.workerPool:LogMainRecalc(GetTime() - recalcStart)
-		end
-	end
+	self:PerformRecalc()
 	if main.showThousandsSeparators ~= self.lastShowThousandsSeparators then
 		self:RefreshStatList()
 	end
