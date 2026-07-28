@@ -670,8 +670,8 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 		end
 	end
 	self.deferSpecRebuild = nil
-	if self.spec and self.spec.rebuildPending then
-		self.spec:BuildAllDependsAndPaths()
+	if self.spec then
+		self.spec:EnsureBuilt()
 	end
 
 	if next(self.configTab.input) == nil then

@@ -1094,6 +1094,16 @@ function PassiveSpecClass:NodesInIntuitiveLeapLikeRadius(node)
 	return result
 end
 
+-- Runs the load-time rebuild this spec deferred, if it is still pending. Only
+-- the active spec is rebuilt when a build is loaded (see Build:Init), so anything
+-- that reads another spec's paths, dependencies or allocation counts -- switching
+-- to it, comparing against it, calculating with it -- has to call this first.
+function PassiveSpecClass:EnsureBuilt()
+	if self.rebuildPending then
+		self:BuildAllDependsAndPaths()
+	end
+end
+
 -- Rebuilds dependencies and paths for all nodes
 function PassiveSpecClass:BuildAllDependsAndPaths()
 	-- Loading a build triggers a full rebuild for every spec, jewel socket and

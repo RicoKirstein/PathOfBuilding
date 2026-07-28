@@ -576,5 +576,28 @@ describe("WorkerPool", function()
 			assert.are.equal(spec2, build.spec)
 			assert.is_nil(spec2.rebuildPending)
 		end)
+
+		it("calculating with a spec that was never activated flushes it", function()
+			-- The tree list tooltip calculates with whichever spec is hovered, which
+			-- is the one way a spec gets read without being switched to. Unbuilt, it
+			-- has no allocatedMasteryTypes for CalcSetup to copy
+			local source = build.treeTab.specList[1]
+			local copy = new("PassiveSpec", build, source.treeVersion)
+			copy.title = "Second"
+			copy.jewels = copyTable(source.jewels)
+			copy:RestoreUndoState(source:CreateUndoState())
+			copy:BuildClusterJewelGraphs()
+			table.insert(build.treeTab.specList, copy)
+			build.treeTab:SetActiveSpec(1)
+			loadBuildFromXML(build:SaveDB("deferred spec rebuild"), "deferred spec rebuild")
+
+			local inactive = build.treeTab.specList[2]
+			assert.is_true(inactive.rebuildPending)
+			assert.is_nil(inactive.allocatedMasteryTypes)
+
+			local calcFunc = build.calcsTab:GetMiscCalculator()
+			assert.is_not_nil(calcFunc({ spec = inactive }))
+			assert.is_nil(inactive.rebuildPending)
+		end)
 	end)
 end)

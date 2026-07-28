@@ -160,8 +160,8 @@ function workerJobs.ApplyPatch(patchXml)
 			end
 		end
 		build.deferSpecRebuild = nil
-		if build.spec and build.spec.rebuildPending then
-			build.spec:BuildAllDependsAndPaths()
+		if build.spec then
+			build.spec:EnsureBuilt()
 		end
 		wipeGlobalCache()
 		build.outputRevision = (build.outputRevision or 1) + 1
