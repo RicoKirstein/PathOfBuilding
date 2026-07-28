@@ -720,7 +720,13 @@ function calcs.initEnv(build, mode, override, specEnv)
 				goto continue
 			end
 			local item
-			if slotName == override.repSlotName then
+			-- repItems swaps several slots at once, which repSlotName/repItem
+			-- cannot express. Evaluating a whole gear set otherwise means
+			-- mutating the build and putting it back, item by item.
+			-- A false value means "leave this slot empty".
+			if override.repItems and override.repItems[slotName] ~= nil then
+				item = override.repItems[slotName] or nil
+			elseif slotName == override.repSlotName then
 				item = override.repItem
 			elseif override.repItem and override.repSlotName:match("^Weapon 1") and slotName:match("^Weapon 2") and
 			(override.repItem.base.type == "Staff" or override.repItem.base.type == "Two Handed Sword" or override.repItem.base.type == "Two Handed Axe" or override.repItem.base.type == "Two Handed Mace"

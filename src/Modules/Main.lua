@@ -68,6 +68,12 @@ function main:Init()
 		self.workerPool.startRequested = true
 	end
 
+	-- Loopback control server for external MCP clients; the module starts and
+	-- stops its bridge from the frame hook according to the setting
+	if not POB_IS_WORKER then
+		self.mcpServer = LoadModule("Modules/McpServer")
+	end
+
 	self.popups = { }
 	self.sharedItemList = { }
 	self.sharedItemSetList = { }
@@ -112,6 +118,18 @@ function main:Init()
 	self.colorNegative = defaultColorCodes.NEGATIVE
 	self.colorHighlight = defaultColorCodes.HIGHLIGHT
 	self.showThousandsSeparators = true
+	-- Settings for the Trader's "Solve Set" dialog, kept here so they survive a
+	-- restart: nobody wants to retype a budget and re-tick eight slots each time
+	self.tradeOptimiser = {
+		objective = "EnergyShield",
+		budget = 200,
+		resist = 75,
+		attrMargin = 10,
+		swaps = false,
+		swapCost = 10,
+		refetch = true,
+		slots = { },
+	}
 	self.useCompactValues = false
 	self.edgeSearchHighlight = true
 	self.thousandsSeparator = ","
@@ -130,6 +148,10 @@ function main:Init()
 	self.showAllItemAffixes = true
 	self.disableScrollControlInteraction = false
 	self.workerPoolCount = 16
+	self.mcpServerEnabled = true
+	self.mcpServerPort = 49080
+	-- named sets of trade search stat weights, shared by all builds
+	self.tradeWeightPresets = { }
 	self.errorReadingSettings = false
 	
 	if not SetDPIScaleOverridePercent then SetDPIScaleOverridePercent = function(scale) end end
@@ -356,6 +378,10 @@ function main:OnFrame()
 		self.workerPool:OnFrame()
 	end
 
+	if self.mcpServer then
+		self.mcpServer:OnFrame()
+	end
+
 	if self.screenH > self.screenW then
 		self.portraitMode = true
 	else
@@ -514,6 +540,7 @@ function main:LoadSettings(ignoreBuild)
 		launch:ShowErrMsg("^1Error parsing 'Settings.xml': 'PathOfBuilding' root element missing")
 		return true
 	end
+	self.tradeWeightPresets = { }
 	for _, node in ipairs(setXML[1]) do
 		if type(node) == "table" then
 			if not ignoreBuild and node.elem == "Mode" then
@@ -655,6 +682,54 @@ function main:LoadSettings(ignoreBuild)
 				if node.attrib.workerPoolCount then
 					self.workerPoolCount = m_min(m_max(m_floor(tonumber(node.attrib.workerPoolCount) or 16), 0), 32)
 				end
+				if node.attrib.mcpServerEnabled then
+					self.mcpServerEnabled = node.attrib.mcpServerEnabled == "true"
+				end
+				if node.attrib.mcpServerPort then
+					self.mcpServerPort = m_min(m_max(m_floor(tonumber(node.attrib.mcpServerPort) or 49080), 1024), 65535)
+				end
+				-- Guarded: a nil here would be a crash during startup, which is the
+				-- worst way for a settings field to be wrong
+				local opt = self.tradeOptimiser or { }
+				self.tradeOptimiser = opt
+				if node.attrib.tradeOptimiserObjective then
+					opt.objective = node.attrib.tradeOptimiserObjective
+				end
+				opt.budget = tonumber(node.attrib.tradeOptimiserBudget) or opt.budget
+				opt.resist = tonumber(node.attrib.tradeOptimiserResist) or opt.resist
+				opt.attrMargin = tonumber(node.attrib.tradeOptimiserAttrMargin) or opt.attrMargin
+				opt.swapCost = tonumber(node.attrib.tradeOptimiserSwapCost) or opt.swapCost
+				if node.attrib.tradeOptimiserSwaps then
+					opt.swaps = node.attrib.tradeOptimiserSwaps == "true"
+				end
+				if node.attrib.tradeOptimiserRefetch then
+					opt.refetch = node.attrib.tradeOptimiserRefetch == "true"
+				end
+				if node.attrib.tradeOptimiserSlots then
+					opt.slots = { }
+					for slotName in node.attrib.tradeOptimiserSlots:gmatch("[^;]+") do
+						opt.slots[slotName] = true
+					end
+				end
+			elseif node.elem == "TradeWeightPresets" then
+				-- stats are validated against the power stat list when used, see TradeQuery
+				for _, child in ipairs(node) do
+					if child.elem == "Preset" and child.attrib.name then
+						local preset = { name = child.attrib.name, weights = { } }
+						for _, statNode in ipairs(child) do
+							if statNode.elem == "Stat" and statNode.attrib.stat then
+								t_insert(preset.weights, {
+									label = statNode.attrib.label,
+									stat = statNode.attrib.stat,
+									weightMult = tonumber(statNode.attrib.weightMult) or 0,
+								})
+							end
+						end
+						if #preset.weights > 0 then
+							t_insert(self.tradeWeightPresets, preset)
+						end
+					end
+				end
 			end
 		end
 	end
@@ -756,6 +831,19 @@ function main:SaveSettings()
 		t_insert(sharedItemList, set)
 	end
 	t_insert(setXML, sharedItemList)
+	local tradeWeightPresets = { elem = "TradeWeightPresets" }
+	for _, preset in ipairs(self.tradeWeightPresets or { }) do
+		local presetXML = { elem = "Preset", attrib = { name = preset.name } }
+		for _, statSort in ipairs(preset.weights) do
+			t_insert(presetXML, { elem = "Stat", attrib = {
+				label = statSort.label,
+				stat = statSort.stat,
+				weightMult = string.format("%.2f", statSort.weightMult or 0),
+			} })
+		end
+		t_insert(tradeWeightPresets, presetXML)
+	end
+	t_insert(setXML, tradeWeightPresets)
 	t_insert(setXML, { elem = "Misc", attrib = {
 		buildSortMode = self.buildSortMode,
 		connectionProtocol = tostring(launch.connectionProtocol),
@@ -789,6 +877,23 @@ function main:SaveSettings()
 		disableScrollControlInteraction = tostring(self.disableScrollControlInteraction),
 		dpiScaleOverridePercent = tostring(self.dpiScaleOverridePercent),
 		workerPoolCount = tostring(self.workerPoolCount or 16),
+		mcpServerEnabled = tostring(self.mcpServerEnabled),
+		mcpServerPort = tostring(self.mcpServerPort or 49080),
+		tradeOptimiserObjective = (self.tradeOptimiser or { }).objective,
+		tradeOptimiserBudget = tostring((self.tradeOptimiser or { }).budget),
+		tradeOptimiserResist = tostring((self.tradeOptimiser or { }).resist),
+		tradeOptimiserAttrMargin = tostring((self.tradeOptimiser or { }).attrMargin),
+		tradeOptimiserSwaps = tostring((self.tradeOptimiser or { }).swaps),
+		tradeOptimiserSwapCost = tostring((self.tradeOptimiser or { }).swapCost),
+		tradeOptimiserRefetch = tostring((self.tradeOptimiser or { }).refetch),
+		tradeOptimiserSlots = (function()
+			local names = { }
+			for slotName, ticked in pairs((self.tradeOptimiser or { }).slots or { }) do
+				if ticked then t_insert(names, slotName) end
+			end
+			table.sort(names)
+			return table.concat(names, ";")
+		end)(),
 	} })
 	local res, errMsg = common.xml.SaveXMLFile(setXML, self.userPath.."Settings.xml")
 	if not res then
@@ -875,11 +980,13 @@ function main:OpenOptionsPopup(savedState)
 		showAllItemAffixes = self.showAllItemAffixes,
 		disableScrollControlInteraction = self.disableScrollControlInteraction,
 		dpiScaleOverridePercent = self.dpiScaleOverridePercent,
-		workerPoolCount = self.workerPoolCount or 16
+		workerPoolCount = self.workerPoolCount or 16,
+		mcpServerEnabled = self.mcpServerEnabled,
+		mcpServerPort = self.mcpServerPort or 49080
 	}
 
 	-- NOTE: Height needs to be adjusted if more menu options are added
-	local oneColumnHeightReq = 880 -- Min height required to not split menu into two columns
+	local oneColumnHeightReq = 904 -- Min height required to not split menu into two columns
 	local columnWidth = 600
 	
 	local startingY = 20
@@ -996,6 +1103,29 @@ function main:OpenOptionsPopup(savedState)
 	controls.workerPoolCount.tooltipText = "Background workers parallelize bulk calculations: gem and item DPS sorting and the tree heat map.\nEach worker holds a full copy of the program and the current build (~300 MB, allocated once calculations first run).\nWith the pool disabled these calculations run on the main thread and the interface freezes while they do.\nChanges apply when you press Save."
 	controls.workerPoolCount:SelByValue(self.workerPoolCount or 16, "count")
 	controls.workerPoolRam = new("LabelControl", { "LEFT", controls.workerPoolCount, "RIGHT" }, { 8, 0, 0, 16 }, workerPoolRamLabel())
+
+	nextRow()
+	controls.mcpServerEnabled = new("CheckBoxControl", { "TOPLEFT", controls.sectionAnchor, "TOPLEFT" }, { currentX + defaultLabelPlacementX, currentY, 20 }, "^7Allow external build control (MCP):", function(state)
+		self.mcpServerEnabled = state
+	end)
+	controls.mcpServerEnabled.state = self.mcpServerEnabled
+	controls.mcpServerEnabled.tooltipText = "Lets an external Model Context Protocol client read and edit the build you have open:\npassive tree, items, skill gems, configuration and calculated stats.\n\nThe server listens on 127.0.0.1 only and is not reachable from other machines,\nbut it is unauthenticated: anything able to run code on this computer can drive your build.\nEdits arrive as normal edits and can be reverted with Ctrl+Z.\nChanges apply when you press Save."
+	controls.mcpServerPort = new("EditControl", { "LEFT", controls.mcpServerEnabled, "RIGHT" }, { 90, 0, 70, 18 }, tostring(self.mcpServerPort or 49080), nil, "%D", 5, function(buf)
+		self.mcpServerPort = m_min(m_max(m_floor(tonumber(buf) or 49080), 1024), 65535)
+	end)
+	controls.mcpServerPortLabel = new("LabelControl", { "RIGHT", controls.mcpServerPort, "LEFT" }, { defaultLabelSpacingPx, 0, 0, 16 }, "^7Port:")
+	controls.mcpServerPort.tooltipText = "TCP port the MCP bridge listens on, on the loopback interface.\nThe client must be pointed at the same port."
+	controls.mcpServerStatus = new("LabelControl", { "LEFT", controls.mcpServerPort, "RIGHT" }, { 8, 0, 0, 16 }, function()
+		local status = self.mcpServer and self.mcpServer:Status()
+		if not status or not status.enabled then
+			return "^8not running"
+		elseif not status.running or not status.listening then
+			return colorCodes.WARNING .. (status.lastError or "starting...")
+		elseif status.clientConnected then
+			return colorCodes.POSITIVE .. string.format("client connected, %d requests", status.requestCount)
+		end
+		return "^8listening, no client"
+	end)
 
 	nextRow()
 	controls.buildPath = new("EditControl", { "TOPLEFT", controls.sectionAnchor, "TOPLEFT" }, { currentX + defaultLabelPlacementX, currentY, 290, 18 })
@@ -1275,6 +1405,8 @@ function main:OpenOptionsPopup(savedState)
 		self.dpiScaleOverridePercent = savedState.dpiScaleOverridePercent
 		SetDPIScaleOverridePercent(self.dpiScaleOverridePercent)
 		self.workerPoolCount = savedState.workerPoolCount
+		self.mcpServerEnabled = savedState.mcpServerEnabled
+		self.mcpServerPort = savedState.mcpServerPort
 		main:ClosePopup()
 	end)
 	

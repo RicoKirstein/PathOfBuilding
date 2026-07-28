@@ -746,10 +746,14 @@ function TradeQueryGeneratorClass:StartQuery(slot, options)
 	-- OnFrame will pick this up and begin the work
 	self.calcContext.co = coroutine.create(self.ExecuteQuery)
 
-	-- Open progress tracking blocker popup
-	local controls = { }
-	controls.progressText = new("LabelControl", {"TOP",nil,"TOP"}, {0, 30, 0, 16}, string.format("Calculating Mod Weights..."))
-	self.calcContext.popup = main:OpenPopup(280, 65, "Please Wait", controls)
+	-- Open progress tracking blocker popup. Callers that did not come from a click
+	-- (the MCP bridge) set noPopup: taking over the window for a search the user
+	-- did not ask for in the UI would interrupt whatever they are doing in it.
+	if not options.noPopup then
+		local controls = { }
+		controls.progressText = new("LabelControl", {"TOP",nil,"TOP"}, {0, 30, 0, 16}, string.format("Calculating Mod Weights..."))
+		self.calcContext.popup = main:OpenPopup(280, 65, "Please Wait", controls)
+	end
 end
 
 function TradeQueryGeneratorClass:ExecuteQuery()
@@ -1049,8 +1053,10 @@ function TradeQueryGeneratorClass:FinishQuery()
 	local queryJson = dkjson.encode(queryTable)
 	self.requesterCallback(self.requesterContext, queryJson, errMsg)
 
-	-- Close blocker popup
-	main:ClosePopup()
+	-- Close blocker popup, if StartQuery opened one
+	if self.calcContext.popup then
+		main:ClosePopup()
+	end
 end
 
 function TradeQueryGeneratorClass:RequestQuery(slot, context, statWeights, callback)

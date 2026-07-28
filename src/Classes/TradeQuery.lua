@@ -12,6 +12,7 @@ local get_time = os.time
 local t_insert = table.insert
 local t_remove = table.remove
 local t_sort = table.sort
+local m_abs = math.abs
 local m_max = math.max
 local m_min = math.min
 local m_ceil = math.ceil
@@ -199,6 +200,200 @@ local function isSameAsDefaultList(list)
 		and list[2].stat == "TotalEHP" and list[2].weightMult == 0.5
 end
 
+-- presets that ship with PoB. these are always offered and cannot be
+-- overwritten or deleted, user presets live in Settings.xml
+local builtinWeightPresets = {
+	{ name = "Balanced (Default)", weights = {
+		{ stat = "FullDPS", weightMult = 1.0 },
+		{ stat = "TotalEHP", weightMult = 0.5 },
+	} },
+	{ name = "Damage Only", weights = {
+		{ stat = "FullDPS", weightMult = 1.0 },
+	} },
+	{ name = "Survivability Only", weights = {
+		{ stat = "TotalEHP", weightMult = 1.0 },
+	} },
+	{ name = "Damage + Life", weights = {
+		{ stat = "FullDPS", weightMult = 1.0 },
+		{ stat = "Life", weightMult = 0.5 },
+	} },
+}
+
+local function isBuiltinPresetName(name)
+	for _, preset in ipairs(builtinWeightPresets) do
+		if preset.name == name then
+			return true
+		end
+	end
+	return false
+end
+
+-- copies a weight list, refreshing label and transform from the current power
+-- stat list and dropping entries for stats that no longer exist
+local function normaliseWeightList(weights)
+	local normalised = { }
+	for _, weight in ipairs(weights or { }) do
+		for _, statEntry in ipairs(data.powerStatList) do
+			if statEntry.stat and statEntry.stat == weight.stat then
+				t_insert(normalised, {
+					label = statEntry.label,
+					stat = statEntry.stat,
+					transform = statEntry.transform,
+					weightMult = round(weight.weightMult or 0, 2),
+				})
+				break
+			end
+		end
+	end
+	return normalised
+end
+
+-- weight lists are unordered, so compare them by stat
+local function weightListsMatch(listA, listB)
+	if #listA ~= #listB then
+		return false
+	end
+	for _, weightA in ipairs(listA) do
+		local matched = false
+		for _, weightB in ipairs(listB) do
+			if weightA.stat == weightB.stat then
+				matched = m_abs(weightA.weightMult - weightB.weightMult) < 0.005
+				break
+			end
+		end
+		if not matched then
+			return false
+		end
+	end
+	return true
+end
+
+-- built-in presets followed by the user's own
+function TradeQueryClass:GetWeightPresets()
+	local presets = { }
+	for _, preset in ipairs(builtinWeightPresets) do
+		t_insert(presets, { name = preset.name, builtin = true, weights = normaliseWeightList(preset.weights) })
+	end
+	for _, preset in ipairs(main.tradeWeightPresets or { }) do
+		local weights = normaliseWeightList(preset.weights)
+		if #weights > 0 then
+			t_insert(presets, { name = preset.name, weights = weights })
+		end
+	end
+	return presets
+end
+
+--- @return table[] list dropdown entries for the presets
+--- @return integer selIndex index of the preset matching the given weights, or of the "Custom" entry
+function TradeQueryClass:BuildWeightPresetList(weights)
+	local list = { }
+	local selIndex
+	for _, preset in ipairs(self:GetWeightPresets()) do
+		t_insert(list, { label = "^7"..preset.name, preset = preset })
+		if not selIndex and weightListsMatch(preset.weights, weights) then
+			selIndex = #list
+		end
+	end
+	if not selIndex then
+		t_insert(list, 1, { label = "^8Custom", custom = true })
+		selIndex = 1
+	end
+	return list, selIndex
+end
+
+-- rebuilds the preset dropdown on the Trader pane and selects whichever preset
+-- matches the weights currently in use
+function TradeQueryClass:RefreshWeightPresetControl()
+	local control = self.controls.weightPreset
+	if not control then
+		return
+	end
+	local list, selIndex = self:BuildWeightPresetList(self.statSortSelectionList)
+	control:SetList(list)
+	control.selIndex = selIndex
+end
+
+function TradeQueryClass:ApplyWeightPreset(preset)
+	local weights = preset and normaliseWeightList(preset.weights)
+	if not weights or #weights == 0 then
+		return
+	end
+	self.statSortSelectionList = weights
+	self.itemsTab.modFlag = true
+	self:RefreshWeightPresetControl()
+	for row_idx in pairs(self.resultTbl) do
+		self:UpdateControlsWithItems(row_idx)
+	end
+end
+
+-- adds or overwrites a user preset and persists it to Settings.xml
+function TradeQueryClass:SaveWeightPreset(name, weights)
+	main.tradeWeightPresets = main.tradeWeightPresets or { }
+	local stored = { name = name, weights = { } }
+	for _, weight in ipairs(weights) do
+		t_insert(stored.weights, { label = weight.label, stat = weight.stat, weightMult = round(weight.weightMult, 2) })
+	end
+	for index, preset in ipairs(main.tradeWeightPresets) do
+		if preset.name == name then
+			main.tradeWeightPresets[index] = stored
+			main:SaveSettings()
+			return
+		end
+	end
+	t_insert(main.tradeWeightPresets, stored)
+	main:SaveSettings()
+end
+
+function TradeQueryClass:DeleteWeightPreset(name)
+	for index, preset in ipairs(main.tradeWeightPresets or { }) do
+		if preset.name == name then
+			t_remove(main.tradeWeightPresets, index)
+			main:SaveSettings()
+			return
+		end
+	end
+end
+
+--- Popup asking for the name to store the given weights under
+--- @param weights table[] weight list to store
+--- @param onSaved fun(name: string)? called after the preset has been written
+function TradeQueryClass:SaveWeightPresetPopup(weights, onSaved)
+	local controls = { }
+	controls.label = new("LabelControl", nil, {0, 20, 0, 16}, "^7Preset name:")
+	controls.edit = new("EditControl", nil, {0, 40, 250, 20}, nil, nil, nil, 40, function(buf)
+		controls.save.enabled = buf:match("%S") ~= nil
+	end)
+	controls.save = new("ButtonControl", nil, {-45, 70, 80, 20}, "Save", function()
+		local name = controls.edit.buf:match("^%s*(.-)%s*$")
+		if name == "" then
+			return
+		end
+		if isBuiltinPresetName(name) then
+			main:OpenMessagePopup("Stat Weight Presets", "'"..name.."' is a built-in preset name.\nPlease choose a different name.")
+			return
+		end
+		local function commit()
+			self:SaveWeightPreset(name, weights)
+			main:ClosePopup()
+			if onSaved then
+				onSaved(name)
+			end
+		end
+		for _, preset in ipairs(main.tradeWeightPresets or { }) do
+			if preset.name == name then
+				main:OpenConfirmPopup("Overwrite Preset", "A preset named '"..name.."' already exists.\nOverwrite it?", "Overwrite", commit)
+				return
+			end
+		end
+		commit()
+	end)
+	controls.save.enabled = false
+	controls.cancel = new("ButtonControl", nil, {45, 70, 80, 20}, "Cancel", function()
+		main:ClosePopup()
+	end)
+	main:OpenPopup(280, 100, "Save Stat Weight Preset", controls, "save", "edit", "cancel")
+end
+
 -- Opens the item pricing popup
 function TradeQueryClass:PriceItem()
 	self.tradeQueryGenerator = new("TradeQueryGenerator", self)
@@ -353,6 +548,29 @@ on trade site to work on other leagues and realms)]]
 			tooltip:AddLine(16, s_format("%s: %.2f", stat.label, stat.weightMult))
 		end
 	end
+
+	-- Stat weight preset selection, for switching between saved sets of weights
+	-- without having to open the weight popup
+	self.controls.weightPresetLabel = new("LabelControl", {"LEFT", self.controls.tradeTypeSelection, "RIGHT"}, {18, 0, 0, row_height - 4}, "^7Weights:")
+	self.controls.weightPreset = new("DropDownControl", {"LEFT", self.controls.weightPresetLabel, "RIGHT"}, {6, 0, 170, row_height}, { }, function(index, value)
+		if value.preset then
+			self:ApplyWeightPreset(value.preset)
+		end
+	end)
+	self.controls.weightPreset.enableDroppedWidth = true
+	self.controls.weightPreset.tooltipFunc = function(tooltip)
+		tooltip:Clear()
+		tooltip:AddLine(16, "Applies a saved set of stat weights to the searches on this pane.")
+		tooltip:AddLine(16, "^8Presets are shared by all builds, and can be created")
+		tooltip:AddLine(16, "^8and removed under 'Adjust search weights'.")
+		local selValue = self.controls.weightPreset:GetSelValue()
+		if selValue and selValue.custom then
+			tooltip:AddLine(16, "")
+			tooltip:AddLine(16, "^7The current weights do not match any preset.")
+		end
+	end
+	self:RefreshWeightPresetControl()
+
 	self.sortModes = {
 		StatValue = "(Highest) Stat Value",
 		StatValuePrice = "Stat Value / Price",
@@ -555,6 +773,31 @@ Highest Weight - Displays the order retrieved from trade]]
 	self.controls.updateCurrencyConversion = new("ButtonControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {pane_margins_horizontal, -pane_margins_vertical, 240, row_height}, "Get Currency Conversion Rates", function()
 		self:PullPoENinjaCurrencyConversion(self.pbLeague)
 	end)
+
+	-- "Find best" answers one slot at a time, which is a different question from
+	-- "what is the best set": the best helmet on its own often breaks the
+	-- resistance cap or the Strength a weapon needs, and paying that back costs
+	-- more than the helmet gained. This solves across the slots together.
+	self.controls.solveSet = new("ButtonControl", {"LEFT", self.controls.updateCurrencyConversion, "RIGHT"}, {8, 0, 110, row_height}, "Solve Set", function()
+		self:OptimiseSetPopup()
+	end)
+	-- Deliberately not gated on having fetched anything: the slots are picked
+	-- inside the dialog and it does its own searching, so requiring results first
+	-- would hide the only way to ask for them
+	self.controls.solveSet.enabled = function()
+		return self.pbLeague ~= nil
+	end
+	self.controls.solveSet.tooltipText = [[Buys a whole gear set rather than one slot at a time.
+
+Tick the slots you are willing to replace, set what to maximise and a budget, and
+it searches those slots and picks the best combination — keeping resistances
+capped, attribute requirements met and the total inside the budget.
+
+"Find best" answers one slot at a time, which is a different question: the best
+helmet on its own often breaks the resistance cap or the Strength a weapon needs.
+
+Anything already fetched above is reused; a slot may also be left alone if that
+turns out better.]]
 	self.controls.pbNotice = new("LabelControl",  {"BOTTOMRIGHT", nil, "BOTTOMRIGHT"}, {-row_height - pane_margins_vertical - row_vertical_padding, -pane_margins_vertical, 300, row_height}, "")
 	self:SetCurrencyConversionButton()
 
@@ -593,20 +836,638 @@ Highest Weight - Displays the order retrieved from trade]]
 	main:OpenPopup(pane_width, self.pane_height, "Trader", self.controls, nil, nil, "close", (scrollBarShown and scrollBarFunc or nil))
 end
 
+-- Gather everything already fetched into pools the optimiser can search.
+-- Prices are normalised to Chaos so a mixed-currency shortlist can be compared;
+-- listings in a currency with no known rate are skipped rather than guessed at.
+function TradeQueryClass:BuildOptimiserPools()
+	local pools, skipped = { }, 0
+	for rowIdx, results in pairs(self.resultTbl) do
+		local slotTbl = self.slotTables[rowIdx]
+		local slotName = slotTbl and (slotTbl.fullName or slotTbl.slotName)
+		if slotName and self.itemsTab.slots[slotName] and results then
+			local pool = { }
+			for _, entry in ipairs(results) do
+				local price = self:ConvertCurrencyToChaos(entry.currency, entry.amount)
+				local ok, item = pcall(function() return new("Item", entry.item_string) end)
+				if price and ok and item and item.base then
+					item:NormaliseQuality()
+					item:BuildModList()
+					t_insert(pool, {
+						slotName = slotName,
+						item = item,
+						price = price,
+						listing = entry,
+						label = (item.title or item.name or item.baseName) .. "  " ..
+							tostring(entry.amount) .. " " .. tostring(entry.currency),
+					})
+				elseif not price then
+					skipped = skipped + 1
+				end
+			end
+			if pool[1] then
+				pools[slotName] = pool
+			end
+		end
+	end
+	return pools, skipped
+end
+
+--- Chaos value of a listing. Chaos itself needs no table, which keeps the common
+--- case working before the user has pulled poe.ninja rates.
+function TradeQueryClass:ConvertCurrencyToChaos(currencyId, amount)
+	if not amount then return nil end
+	if currencyId == "chaos" then return amount end
+	local divs = self:ConvertCurrencyToDivs(currencyId, amount)
+	local chaosPerDiv = self.pbCurrencyConversion[self.pbLeague]
+		and self.pbCurrencyConversion[self.pbLeague]["chaos"]
+	if divs and chaosPerDiv and chaosPerDiv > 0 then
+		return divs / chaosPerDiv
+	end
+	return nil
+end
+
+--- Equipment slots the optimiser can search and swap, paired with their row in
+--- the Trader so results land where the rest of the UI expects them.
+function TradeQueryClass:OptimisableSlots()
+	local slots = { }
+	for rowIdx, slotTbl in pairs(self.slotTables) do
+		local slotName = slotTbl.fullName or slotTbl.slotName
+		local slot = slotName and self.itemsTab.slots[slotName]
+		if slot and not slotTbl.unique and not slot.inactive then
+			t_insert(slots, { slotName = slotName, rowIdx = rowIdx, slot = slot })
+		end
+	end
+	t_sort(slots, function(a, b) return a.rowIdx < b.rowIdx end)
+	return slots
+end
+
+-- Pseudo trade mods that total a stat across an item, which is what a search has
+-- to ask for when the constraint is on the build's total rather than one roll
+local pseudoForStat = {
+	Str = "pseudo.pseudo_total_strength",
+	Dex = "pseudo.pseudo_total_dexterity",
+	Int = "pseudo.pseudo_total_intelligence",
+}
+local pseudoElementalResist = "pseudo.pseudo_total_elemental_resistance"
+-- Ceilings so one demand cannot be set so high that the search returns nothing
+local maxPseudoResist = 80
+local maxPseudoAttribute = 45
+
+--- Decide the handful of ways each slot should be searched.
+---
+--- The naive fix for "the best Energy Shield helmet has no resistances" is to
+--- demand resistance on every search. That is the wrong answer, and it is the
+--- reason this is hard: it forces every slot to pay for resistance, when the
+--- cheapest set usually comes from one item carrying a great deal of it and the
+--- rest carrying none. Forcing it everywhere prices out exactly the combination
+--- worth having.
+---
+--- So each slot is searched several ways and the results pooled: once for the
+--- objective alone, once for an item that carries a serious share of the missing
+--- resistance, and once per short attribute. The solver then decides which slot
+--- covers what — including leaving a slot with none of it.
+---
+--- The shortfall is measured with every slot being replaced emptied, because what
+--- matters is what the new items must supply between them, not what the current
+--- ones happen to have.
+---@param slotEntries table @ the slots about to be searched
+---@param constraints table
+---@return table profiles, table summary
+function TradeQueryClass:OptimiserSearchProfiles(slotEntries, constraints)
+	local profiles = { { label = "best", requiredMods = nil } }
+	local summary = { }
+	if #slotEntries == 0 then
+		return profiles, summary
+	end
+
+	local calcFunc = self.itemsTab.build.calcsTab:GetMiscCalculator()
+	local repItems = { }
+	for _, entry in ipairs(slotEntries) do
+		repItems[entry.slotName] = false
+	end
+	local stripped = calcFunc({ repItems = repItems }, true)
+
+	local function floorFor(constraint)
+		if constraint.atLeast then
+			return (stripped[constraint.atLeast] or 0) + (constraint.margin or 0)
+		end
+		return constraint.min + (constraint.margin or 0)
+	end
+
+	-- Resistances go in as one elemental total rather than three separate demands:
+	-- an item carrying all three at once barely exists, the total is a normal
+	-- roll, and the distribution can be sorted out afterwards
+	local resistNeed = 0
+	for _, constraint in ipairs(constraints) do
+		if constraint.stat:find("ResistTotal$") then
+			resistNeed = resistNeed + m_max(0, floorFor(constraint) - (stripped[constraint.stat] or 0))
+		end
+	end
+	if resistNeed > 0 then
+		-- Half the shortfall on a single item, not an even split across slots:
+		-- the point is to find the pieces that could carry most of it alone, so
+		-- the others are free to be whatever is best for the objective
+		local ask = m_min(m_ceil(resistNeed / 2), maxPseudoResist)
+		t_insert(profiles, {
+			label = "resistance",
+			requiredMods = { { tradeId = pseudoElementalResist, value = ask } },
+		})
+		t_insert(summary, s_format("+%d%% elemental resistance", ask))
+	end
+
+	-- Attributes: only the ones actually short, worst first, at most two
+	local attrNeeds = { }
+	for _, constraint in ipairs(constraints) do
+		local id = pseudoForStat[constraint.stat]
+		if id then
+			local need = floorFor(constraint) - (stripped[constraint.stat] or 0)
+			if need > 0 then
+				t_insert(attrNeeds, { stat = constraint.stat, id = id, need = need })
+			end
+		end
+	end
+	t_sort(attrNeeds, function(a, b) return a.need > b.need end)
+	for index = 1, m_min(#attrNeeds, 2) do
+		local entry = attrNeeds[index]
+		local ask = m_min(m_ceil(entry.need / 2), maxPseudoAttribute)
+		t_insert(profiles, {
+			label = entry.stat,
+			requiredMods = { { tradeId = entry.id, value = ask } },
+		})
+		t_insert(summary, s_format("+%d %s", ask, entry.stat))
+	end
+	return profiles, summary
+end
+
+--- Run one slot's weighted search, the same one "Find best" runs, without the
+--- options popup. Results go into resultTbl so the Trader rows update too.
+---@param entry table @ from OptimisableSlots
+---@param settings table @ { objective, budget, includeCorrupted }
+---@param callback fun(errMsg: string?)
+function TradeQueryClass:SearchSlotForOptimiser(entry, settings, callback)
+	local template
+	for _, stat in ipairs(data.powerStatList) do
+		if stat.stat == settings.objective then
+			template = copyTable(stat)
+			break
+		end
+	end
+	if not template then
+		return callback("Unknown objective stat")
+	end
+	template.weightMult = 1
+
+	local generator = self.tradeQueryGenerator
+	if not generator then
+		return callback("Trade query generator is not ready")
+	end
+	-- FinishQuery reads the listing status off the generator rather than options
+	generator.tradeTypeIndex = self.tradeTypeIndex or 4
+	generator.requesterCallback = function(context, query, errMsg)
+		if errMsg then
+			return callback(errMsg)
+		end
+		self.lastQueries[entry.rowIdx] = query
+		self.tradeQueryRequests:SearchWithQueryWeightAdjusted(self.pbRealm, self.pbLeague, query,
+			function(items, searchErr)
+				if searchErr then
+					return callback(searchErr)
+				end
+				callback(nil, self:FilterToSafeItems(items, entry.slotName))
+			end,
+			{
+				callbackQueryId = function(queryId)
+					local url = self.tradeQueryRequests:buildUrl(self.hostName .. "trade/search",
+						self.pbRealm, self.pbLeague, queryId)
+					if self.controls["uri" .. entry.rowIdx] then
+						self.controls["uri" .. entry.rowIdx]:SetText(url, true)
+					end
+				end,
+			})
+	end
+	generator.requesterContext = { }
+	-- StartQuery bails before creating a context for an item type it cannot
+	-- weight, leaving the previous slot's finished coroutine in place; clearing
+	-- it first is what makes the check below mean anything
+	generator.calcContext = generator.calcContext or { }
+	generator.calcContext.co = nil
+	generator:StartQuery(entry.slot, {
+		statWeights = { template },
+		influence1 = 1,
+		influence2 = 1,
+		includeMirrored = false,
+		includeCorrupted = settings.includeCorrupted ~= false,
+		includeScourge = false,
+		includeTalisman = false,
+		includeAllWEMods = false,
+		jewelType = "Base",
+		maxPrice = settings.budget,
+		maxPriceType = "chaos",
+		-- The hard constraints, built into the query itself: without them the
+		-- search returns the best items for the objective and nothing else, and
+		-- no combination of those keeps the caps
+		requiredMods = settings.requiredMods,
+		-- The user is looking at this dialog; do not throw another one over it
+		noPopup = true,
+	})
+	if not generator.calcContext.co then
+		return callback("This slot cannot be searched for automatically")
+	end
+end
+
+-- Popup: configure and run the set solve
+function TradeQueryClass:OptimiseSetPopup()
+	local controls = { }
+	local pools, skipped = self:BuildOptimiserPools()
+	local slotNames = { }
+	for slotName in pairs(pools) do t_insert(slotNames, slotName) end
+	t_sort(slotNames)
+
+	-- Persisted in Settings.xml so the dialog opens the way it was left
+	local opt = main.tradeOptimiser
+	local optimiser = new("TradeSetOptimiser", self.itemsTab)
+	local objectiveList = { }
+	for _, entry in ipairs(data.powerStatList) do
+		if entry.stat and not entry.ignoreForItems then
+			t_insert(objectiveList, entry)
+		end
+	end
+
+	local row = 0
+	local function nextY()
+		row = row + 1
+		return 26 * row - 6
+	end
+
+	-- Slot picker: which slots the solve is allowed to touch. Anything already
+	-- fetched starts ticked, so the flow still works for someone who came here
+	-- after pressing "Find best" a few times.
+	local slotEntries = self:OptimisableSlots()
+	local hasResults = { }
+	for _, name in ipairs(slotNames) do hasResults[name] = true end
+
+	controls.slotsLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 },
+		"^7Slots to consider:")
+	local perColumn = m_ceil(#slotEntries / 2)
+	local slotRowTop = 26 * row - 6
+	for index, entry in ipairs(slotEntries) do
+		local column = index > perColumn and 1 or 0
+		local rowInColumn = index > perColumn and (index - perColumn - 1) or (index - 1)
+		local name = "slot" .. index
+		controls[name] = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" },
+			{ 190 + column * 300, slotRowTop + 22 + rowInColumn * 22, 18, 18 },
+			"^7" .. entry.slotName .. ":", function() end, nil, false)
+		-- Remembered ticks win; otherwise anything already fetched starts on
+		local remembered = opt.slots[entry.slotName]
+		controls[name].state = remembered ~= nil and remembered or (next(opt.slots) == nil and hasResults[entry.slotName] or false)
+		entry.control = controls[name]
+		-- Every slot carries its own outcome. A single summary line cannot say
+		-- which slot found nothing, and "no items were found" without a per-slot
+		-- breakdown is not a diagnosis.
+		controls[name .. "n"] = new("LabelControl", { "LEFT", controls[name], "RIGHT" }, { 6, 0, 0, 14 },
+			hasResults[entry.slotName] and ("^8" .. #(self.resultTbl[entry.rowIdx] or { }) .. " fetched") or "")
+		entry.countLabel = controls[name .. "n"]
+	end
+	row = row + m_ceil(perColumn * 22 / 26) + 1
+
+	controls.objectiveLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Maximise:")
+	controls.objective = new("DropDownControl", { "LEFT", controls.objectiveLabel, "RIGHT" }, { 8, 0, 220, 20 },
+		objectiveList, function() end)
+	for index, entry in ipairs(objectiveList) do
+		if entry.stat == opt.objective then
+			controls.objective:SetSel(index)
+			break
+		end
+	end
+
+	controls.budgetLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Budget (Chaos):")
+	controls.budget = new("EditControl", { "LEFT", controls.budgetLabel, "RIGHT" }, { 8, 0, 100, 20 },
+		tostring(opt.budget), nil, "%D")
+
+	controls.resistLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Resistances at least:")
+	controls.resist = new("EditControl", { "LEFT", controls.resistLabel, "RIGHT" }, { 8, 0, 60, 20 },
+		tostring(opt.resist), nil, "%D")
+	controls.attrLabel = new("LabelControl", { "LEFT", controls.resist, "RIGHT" }, { 16, 0, 0, 16 }, "^7Attribute headroom:")
+	controls.attr = new("EditControl", { "LEFT", controls.attrLabel, "RIGHT" }, { 8, 0, 60, 20 },
+		tostring(opt.attrMargin), nil, "%D")
+	controls.attr.tooltipText = "Requirements are read from each set as it is measured, because gear with reduced Attribute Requirements lowers the requirement rather than raising the attribute. This is how much room to leave above whatever the requirement turns out to be."
+
+	controls.swapCheck = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY(), 20, 20 },
+		"^7Allow resistance swap crafts:", function(state) end, nil, false)
+	controls.swapCheck.state = opt.swaps
+	controls.swapCost = new("EditControl", { "LEFT", controls.swapCheck, "RIGHT" }, { 8, 0, 60, 20 },
+		tostring(opt.swapCost), nil, "%D")
+	controls.swapCost.shown = function() return controls.swapCheck.state end
+	controls.swapCostLabel = new("LabelControl", { "LEFT", controls.swapCost, "RIGHT" }, { 8, 0, 0, 16 }, "^8Chaos each")
+	controls.swapCostLabel.shown = function() return controls.swapCheck.state end
+	controls.swapCheck.tooltipText = [[The Harvest bench can change one elemental resistance to another on an uncorrupted, unmirrored item.
+
+With this on, which element the resistance lands on stops mattering — only the total does — which usually finds a cheaper set. The result says how many swaps it needs.
+
+Counted in resistance points rather than whole modifiers, so treat a nonzero count as "needs bench work" and check the per-element numbers before buying.]]
+
+	controls.demands = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 }, "")
+	controls.status = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 }, "")
+	local resultRows = { }
+
+	local function clearResults()
+		for _, name in ipairs(resultRows) do controls[name] = nil end
+		resultRows = { }
+	end
+
+	local solveState = { }
+
+	local function showResult(result)
+		clearResults()
+		if not result.ok then
+			controls.status.label = "^1" .. result.reason ..
+				(result.measured and ("  ^8(measured " .. result.measured .. ")") or "")
+			return
+		end
+		self.optimiserResult = result
+		local gain = result.score - result.baseScore
+		controls.status.label = s_format("^7%s ^8%.0f ^7-> ^8%.0f ^7(%+.0f)   ^7cost ^8%.0f Chaos^7%s   ^8measured %d of %d",
+			controls.objective:GetSelValueByKey("label") or result.objective,
+			result.baseScore, result.score, gain, result.cost,
+			result.swaps > 0 and s_format("  ^7+ %d swap craft%s", result.swaps, result.swaps == 1 and "" or "s") or "",
+			result.measured, result.shortlisted)
+		local anchor = controls.solve
+		for _, cand in ipairs(result.combo) do
+			if not cand.keep then
+				local name = "res" .. #resultRows
+				controls[name] = new("LabelControl", { "TOPLEFT", anchor, "BOTTOMLEFT" },
+					{ 0, anchor == controls.solve and 14 or 6, 0, 16 },
+					s_format("^7%-14s ^8%s", cand.slotName, cand.label))
+				anchor = controls[name]
+				t_insert(resultRows, name)
+			end
+		end
+		local resistLine = s_format("^8fire %.0f  cold %.0f  lightning %.0f      Str %.0f/%.0f  Dex %.0f/%.0f  Int %.0f/%.0f",
+			result.stats.FireResistTotal or 0, result.stats.ColdResistTotal or 0,
+			result.stats.LightningResistTotal or 0,
+			result.stats.Str or 0, result.stats.ReqStr or 0,
+			result.stats.Dex or 0, result.stats.ReqDex or 0,
+			result.stats.Int or 0, result.stats.ReqInt or 0)
+		controls.resistSummary = new("LabelControl", { "TOPLEFT", anchor, "BOTTOMLEFT" }, { 0, 8, 0, 16 }, resistLine)
+		t_insert(resultRows, "resistSummary")
+	end
+
+	-- Search driver. The generator holds one query at a time, so slots go through
+	-- a queue rather than all at once; the request layer's rate limiter paces the
+	-- HTTP behind it either way.
+	local searchState = { queue = { }, active = nil, errors = { }, total = 0, done = 0 }
+
+	--- Capture the dialog into the persisted settings, and write them to disk so
+	--- the next session opens with the same choices.
+	local function readSettings()
+		opt.objective = controls.objective:GetSelValueByKey("stat")
+		opt.budget = tonumber(controls.budget.buf) or opt.budget
+		opt.resist = tonumber(controls.resist.buf) or opt.resist
+		opt.attrMargin = tonumber(controls.attr.buf) or opt.attrMargin
+		opt.swaps = controls.swapCheck.state
+		opt.swapCost = tonumber(controls.swapCost.buf) or opt.swapCost
+		opt.refetch = controls.refetch.state
+		opt.slots = { }
+		for _, entry in ipairs(slotEntries) do
+			opt.slots[entry.slotName] = entry.control.state
+		end
+		main:SaveSettings()
+		return { objective = opt.objective, budget = opt.budget }
+	end
+
+	local function refreshPools()
+		pools, skipped = self:BuildOptimiserPools()
+		slotNames = { }
+		for slotName in pairs(pools) do t_insert(slotNames, slotName) end
+		t_sort(slotNames)
+	end
+
+	local function startSolve()
+		refreshPools()
+		if not slotNames[1] then
+			local why = "^1Nothing to solve with. "
+			if searchState.errors and searchState.errors[1] then
+				why = why .. "^1" .. table.concat(searchState.errors, "   ")
+			elseif skipped > 0 then
+				why = why .. s_format("^1All %d listing(s) were priced in a currency with no known rate - press \"Get Currency Conversion Rates\".", skipped)
+			else
+				why = why .. "^1The searches returned nothing for these slots. Try a larger budget, a lower resistance requirement, or fewer slots (the requirement is split across them)."
+			end
+			controls.status.label = why
+			return
+		end
+		if skipped > 0 then
+			controls.status.label = s_format("^8%d listing(s) skipped: no conversion rate for that currency.", skipped)
+		end
+		local settings = {
+			objective = opt.objective,
+			budget = opt.budget,
+			constraints = optimiser:DefaultConstraints(opt.resist, opt.attrMargin),
+			resistTarget = opt.swaps and opt.resist or nil,
+			resistSwapCost = opt.swaps and opt.swapCost or 0,
+			maxResistSwaps = opt.swaps and 3 or 0,
+		}
+		clearResults()
+		controls.status.label = "^7Solving..."
+		-- Solving spans many calculator passes, so it runs as a coroutine off the
+		-- frame loop; the window keeps drawing and the status line keeps moving
+		solveState.co = coroutine.create(function()
+			return optimiser:Solve(pools, settings, function(phase, done, total)
+				controls.status.label = total
+					and s_format("^7%s ^8%d / %d", phase, done, total)
+					or s_format("^7%s^8%s", phase, done and (" " .. done) or "")
+			end)
+		end)
+	end
+	searchState.startSolve = startSolve
+
+	controls.refetch = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY() + 8, 18, 18 },
+		"^7Re-search slots with items:", function() end, nil, false)
+	controls.refetch.state = opt.refetch
+	controls.refetch.tooltipText = "Listings sell quickly. Leave this on if the results in the Trader are more than a few minutes old."
+
+	controls.solve = new("ButtonControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY() + 12, 150, 20 },
+		"Solve Set", function()
+			readSettings()
+			clearResults()
+			self.optimiserResult = nil
+			-- Fetch whatever the ticked slots are missing, then solve. Slots that
+			-- already have items are left alone unless asked for fresh ones.
+			searchState.queue, searchState.errors = { }, { }
+			local toSearch = { }
+			for _, entry in ipairs(slotEntries) do
+				if entry.control.state then
+					local existing = self.resultTbl[entry.rowIdx]
+					if controls.refetch.state or not (existing and existing[1]) then
+						t_insert(toSearch, entry)
+					end
+				end
+			end
+			local constraints = optimiser:DefaultConstraints(opt.resist, opt.attrMargin)
+			local profiles, summary = self:OptimiserSearchProfiles(toSearch, constraints)
+			-- Each slot is searched once per profile and the results pooled, so a
+			-- slot can end up with resistance-heavy items, pure objective items, or
+			-- both, and the solver picks which slot carries what
+			for _, entry in ipairs(toSearch) do
+				for profileIdx, profile in ipairs(profiles) do
+					t_insert(searchState.queue, { entry = entry, profile = profile, first = profileIdx == 1 })
+				end
+			end
+			searchState.total, searchState.done = #searchState.queue, 0
+			searchState.settings = { objective = opt.objective, budget = opt.budget }
+			controls.demands.label = summary[1]
+				and s_format("^7Searching each slot %d ways: ^8best %s, or carrying %s",
+					#profiles, tostring(opt.objective), table.concat(summary, " / "))
+				or "^8Nothing to make up; searching on " .. tostring(opt.objective) .. " alone."
+			if searchState.total == 0 then
+				startSolve()
+			else
+				searchState.thenSolve = true
+				controls.status.label = s_format("^7Searching 0 / %d...", searchState.total)
+			end
+		end)
+	controls.solve.enabled = function()
+		if solveState.co or searchState.active or searchState.queue[1] then return false end
+		for _, entry in ipairs(slotEntries) do
+			if entry.control.state then return true end
+		end
+		return false
+	end
+	controls.solve.tooltipText = [[Tick the slots you are willing to replace, then press this.
+
+Any ticked slot without items is searched first — the same weighted search "Find best" runs, using the objective and budget set here — and the solve follows automatically.
+
+Searches run one slot at a time, because the query generator handles one at a time and the trade API is rate limited. Results also land in the Trader rows behind this dialog.]]
+
+	controls.equip = new("ButtonControl", { "LEFT", controls.solve, "RIGHT" }, { 8, 0, 110, 20 }, "Equip Set", function()
+		local result = self.optimiserResult
+		if not (result and result.ok) then return end
+		for _, cand in ipairs(result.combo) do
+			if not cand.keep then
+				local item = new("Item", cand.item:BuildRaw())
+				item:NormaliseQuality()
+				item:BuildModList()
+				self.itemsTab:AddItem(item, true)
+				self.itemsTab.slots[cand.slotName]:SetSelItemId(item.id)
+			end
+		end
+		self.itemsTab:PopulateSlots()
+		self.itemsTab:AddUndoState()
+		self.itemsTab.build.buildFlag = true
+		main:ClosePopup()
+	end)
+	controls.equip.enabled = function()
+		return self.optimiserResult and self.optimiserResult.ok and true or false
+	end
+	controls.equip.tooltipText = "Puts the solved set into the build. Undoable with Ctrl+Z."
+
+	controls.close = new("ButtonControl", { "LEFT", controls.equip, "RIGHT" }, { 8, 0, 90, 20 }, "Close", function()
+		searchState.queue = { }
+		main.onFrameFuncs["TradeSetOptimiser"] = nil
+		main:ClosePopup()
+	end)
+
+	main.onFrameFuncs["TradeSetOptimiser"] = function()
+		-- One slot search at a time, then the solve
+		if not searchState.active and searchState.queue[1] then
+			local job = t_remove(searchState.queue, 1)
+			local entry, profile = job.entry, job.profile
+			searchState.active = job
+			controls.status.label = s_format("^7Searching %s ^8(%s)  ^8%d / %d",
+				entry.slotName, profile.label, searchState.done + 1, searchState.total)
+			if entry.countLabel then
+				entry.countLabel.label = "^7searching " .. profile.label .. "..."
+			end
+			local settings = {
+				objective = searchState.settings.objective,
+				budget = searchState.settings.budget,
+				requiredMods = profile.requiredMods,
+			}
+			self:SearchSlotForOptimiser(entry, settings, function(errMsg, items)
+				searchState.done = searchState.done + 1
+				if errMsg then
+					-- One profile finding nothing is normal — no item on this base
+					-- carries that much resistance — and must not discard the others
+					if job.first then
+						t_insert(searchState.errors, entry.slotName .. ": " .. tostring(errMsg))
+					end
+				else
+					-- Pool with what the slot's other profiles found, by listing id
+					local pooled, seen = { }, { }
+					if not job.first then
+						for _, existing in ipairs(self.resultTbl[entry.rowIdx] or { }) do
+							if existing.id and not seen[existing.id] then
+								seen[existing.id] = true
+								t_insert(pooled, existing)
+							end
+						end
+					end
+					for _, found in ipairs(items or { }) do
+						if found.id and not seen[found.id] then
+							seen[found.id] = true
+							t_insert(pooled, found)
+						end
+					end
+					self.resultTbl[entry.rowIdx] = pooled
+					-- Refreshing the Trader row is a convenience, not the point of
+					-- the search; a failure there must not lose the results
+					pcall(function() self:UpdateControlsWithItems(entry.rowIdx) end)
+				end
+				local pool = #(self.resultTbl[entry.rowIdx] or { })
+				if entry.countLabel then
+					entry.countLabel.label = (pool > 0 and "^8" or "^1") .. pool .. " found"
+				end
+				searchState.active = nil
+				if not searchState.queue[1] then
+					refreshPools()
+					if searchState.errors[1] then
+						controls.status.label = "^7Searched " .. searchState.done .. " slot(s).  ^1" ..
+							table.concat(searchState.errors, "   ")
+					end
+					if searchState.thenSolve then
+						searchState.thenSolve = false
+						searchState.startSolve()
+					end
+				end
+			end)
+		end
+		if solveState.co then
+			local ok, result = coroutine.resume(solveState.co)
+			if not ok then
+				solveState.co = nil
+				controls.status.label = "^1Solve failed: " .. tostring(result)
+				ConPrintf("TradeSetOptimiser error: %s", tostring(result))
+			elseif coroutine.status(solveState.co) == "dead" then
+				solveState.co = nil
+				showResult(result or { ok = false, reason = "No result." })
+			end
+		end
+	end
+
+	-- Slot grid, then the settings block, then the buttons, then up to one
+	-- result row per slot plus the summary line
+	-- Reserving a result row per slot makes the dialog taller than a screen once
+	-- flasks and abyssal sockets are counted; nobody replaces that many at once
+	local popupHeight = 210 + m_ceil(#slotEntries / 2) * 22 + 130 + (m_min(#slotEntries, 9) + 2) * 22
+	main:OpenPopup(820, popupHeight, "Solve Gear Set", controls)
+end
+
 -- Popup to set stat weight multipliers for sorting
 function TradeQueryClass:SetStatWeights(previousSelectionList)
 	previousSelectionList = previousSelectionList or {}
 	local controls = { }
 	local statList = { }
 	local sliderController = { index = 1 }
-	local popupHeight = 500
+	local popupHeight = 530
 
-	local listYOffset = 45
+	local presetYOffset = 18
+	local sliderYOffset = 46
+	local listYOffset = 72
 	-- account for top gap, bottom button size and gap, and a gap before buttons
-	local listHeight = popupHeight - 45 - 30 - 10
+	local listHeight = popupHeight - listYOffset - 30 - 10
 
 	controls.ListControl = new("TradeStatWeightMultiplierListControl", { "TOPLEFT", nil, "TOPRIGHT" },
-		{ -410, 45, 400, listHeight }, statList, sliderController)
+		{ -410, listYOffset, 400, listHeight }, statList, sliderController)
 
 	for _, stat in ipairs(data.powerStatList) do
 		if not stat.ignoreForItems and stat.label ~= "Name" then
@@ -622,7 +1483,9 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 		end
 	end
 
-	controls.SliderLabel = new("LabelControl", { "TOPLEFT", nil, "TOPRIGHT" }, {-410, 20, 0, 16}, "^7"..statList[1].stat.label..":")
+	controls.SliderLabel = new("LabelControl", { "TOPLEFT", nil, "TOPRIGHT" }, {-410, sliderYOffset, 0, 16}, "^7"..statList[1].stat.label..":")
+	-- assigned further down, once the preset dropdown exists
+	local refreshPresets
 	controls.Slider = new("SliderControl", { "TOPLEFT", controls.SliderLabel, "TOPRIGHT" }, {20, 0, 150, 16}, function(value)
 		if value == 0 then
 			controls.SliderValue.label = "^7Disabled"
@@ -632,6 +1495,9 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 			controls.SliderValue.label = s_format("^7%.2f", 0.01 + value * 0.99)
 			statList[sliderController.index].stat.weightMult = 0.01 + value * 0.99
 			statList[sliderController.index].label = s_format("%.2f :  ", 0.01 + value * 0.99)..statList[sliderController.index].stat.label
+		end
+		if refreshPresets then
+			refreshPresets()
 		end
 	end)
 	controls.SliderValue = new("LabelControl", { "TOPLEFT", controls.Slider, "TOPRIGHT" }, {20, 0, 0, 16}, "^7Disabled")
@@ -648,32 +1514,116 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 	sliderController.Slider = controls.Slider
 	sliderController.SliderValue = controls.SliderValue
 
-	for _, statBase in ipairs(self.statSortSelectionList) do
-		for _, stat in ipairs(statList) do
-			if stat.stat.stat == statBase.stat then
-				stat.stat.weightMult = statBase.weightMult
-				stat.label = s_format("%.2f :  ", statBase.weightMult)..statBase.label
-				if statList[sliderController.index].stat.stat == statBase.stat then
-					controls.Slider:SetVal(statBase.weightMult == 1 and 1 or statBase.weightMult - 0.01)
+	-- weights of the stats currently set above 0, in power stat list order.
+	-- rounded to the two decimals the list and the slider display
+	local function getEditedWeights()
+		local weights = { }
+		for _, statTable in ipairs(statList) do
+			if statTable.stat.weightMult > 0 then
+				t_insert(weights, {
+					label = statTable.stat.label,
+					stat = statTable.stat.stat,
+					transform = statTable.stat.transform,
+					weightMult = round(statTable.stat.weightMult, 2),
+				})
+			end
+		end
+		return weights
+	end
+
+	local function statRowLabel(statTable)
+		return statTable.stat.weightMult > 0
+			and s_format("%.2f :  ", statTable.stat.weightMult)..statTable.stat.label
+			or s_format("%d      :  ", 0)..statTable.stat.label
+	end
+
+	-- moves the slider row onto the stat it points at
+	local function syncSliderToSelection()
+		local selected = statList[sliderController.index]
+		if not selected then
+			return
+		end
+		local weightMult = selected.stat.weightMult
+		controls.SliderLabel.label = "^7"..selected.stat.label..":"
+		controls.Slider:SetVal(weightMult == 0 and 0 or (weightMult == 1 and 1 or weightMult - 0.01))
+		-- the slider callback rewrites the entry from the knob position, so put the exact value back
+		selected.stat.weightMult = weightMult
+		selected.label = statRowLabel(selected)
+		controls.SliderValue.label = weightMult > 0 and s_format("^7%.2f", weightMult) or "^7Disabled"
+	end
+
+	-- resets every stat to 0 and applies the given weights on top
+	local function applyWeights(weights)
+		for _, statTable in ipairs(statList) do
+			statTable.stat.weightMult = 0
+			statTable.label = statRowLabel(statTable)
+		end
+		for _, statBase in ipairs(weights) do
+			for _, statTable in ipairs(statList) do
+				if statTable.stat.stat == statBase.stat then
+					statTable.stat.weightMult = statBase.weightMult
+					statTable.label = statRowLabel(statTable)
 				end
 			end
 		end
+		syncSliderToSelection()
+		refreshPresets()
 	end
+
+	-- preset selection and management
+	controls.presetLabel = new("LabelControl", { "TOPLEFT", nil, "TOPRIGHT" }, {-410, presetYOffset + 2, 0, 16}, "^7Preset:")
+	controls.preset = new("DropDownControl", { "TOPLEFT", controls.presetLabel, "TOPRIGHT" }, {6, -2, 172, 20}, { }, function(index, value)
+		if value.preset then
+			applyWeights(value.preset.weights)
+		end
+	end)
+	controls.preset.enableDroppedWidth = true
+	controls.preset.tooltipText = "Loads a saved set of stat weights.\nThe weights are only applied to your searches once you hit Save."
+	refreshPresets = function()
+		local list, selIndex = self:BuildWeightPresetList(getEditedWeights())
+		controls.preset:SetList(list)
+		controls.preset.selIndex = selIndex
+	end
+	controls.presetSave = new("ButtonControl", { "TOPLEFT", controls.preset, "TOPRIGHT" }, {6, 0, 86, 20}, "Save As...", function()
+		local weights = getEditedWeights()
+		if #weights == 0 then
+			main:OpenMessagePopup("Stat Weight Presets", "Set at least one stat weight above 0\nbefore saving it as a preset.")
+			return
+		end
+		self:SaveWeightPresetPopup(weights, function()
+			refreshPresets()
+		end)
+	end)
+	controls.presetSave.tooltipText = "Saves the weights set below as a named preset, available to all builds."
+	controls.presetDelete = new("ButtonControl", { "TOPLEFT", controls.presetSave, "TOPRIGHT" }, {6, 0, 70, 20}, "Delete", function()
+		local selValue = controls.preset:GetSelValue()
+		if not selValue or not selValue.preset then
+			return
+		end
+		local name = selValue.preset.name
+		main:OpenConfirmPopup("Delete Preset", "Delete the stat weight preset '"..name.."'?", "Delete", function()
+			self:DeleteWeightPreset(name)
+			refreshPresets()
+		end)
+	end)
+	controls.presetDelete.enabled = function()
+		local selValue = controls.preset:GetSelValue()
+		return (selValue and selValue.preset and not selValue.preset.builtin) == true
+	end
+	controls.presetDelete.tooltipText = "Removes the selected preset. Built-in presets cannot be removed."
+
+	applyWeights(self.statSortSelectionList)
 
 	controls.finalise = new("ButtonControl", { "BOTTOM", nil, "BOTTOM" }, {-90, -10, 80, 20}, "Save", function()
 		main:ClosePopup()
 
 		-- used in ItemsTab to save to xml under TradeSearchWeights node
-		local statSortSelectionList = {}
-		for stat, statTable in pairs(statList) do
-			if statTable.stat.weightMult > 0 then
-				t_insert(statSortSelectionList, statTable.stat)
-			end
-		end
+		local statSortSelectionList = getEditedWeights()
 		if (#statSortSelectionList) > 0 then
 			--THIS SHOULD REALLY GIVE A WARNING NOT JUST USE PREVIOUS
 			self.statSortSelectionList = statSortSelectionList
 		end
+		self:RefreshWeightPresetControl()
 		for row_idx in pairs(self.resultTbl) do
 			self:UpdateControlsWithItems(row_idx)
 		end
@@ -682,6 +1632,7 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 		if previousSelectionList and #previousSelectionList > 0 then
 			self.statSortSelectionList = copyTable(previousSelectionList, true)
 		end
+		self:RefreshWeightPresetControl()
 		main:ClosePopup()
 	end)
 	controls.reset = new("ButtonControl", { "BOTTOM", nil, "BOTTOM" }, { 90, -10, 80, 20 }, "Reset", function()
