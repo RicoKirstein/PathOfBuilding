@@ -941,13 +941,13 @@ function TradeQueryClass:BuildOptimiserPools()
 end
 
 --- Chaos value of a listing. Chaos itself needs no table, which keeps the common
---- case working before the user has pulled poe.ninja rates.
+--- case working before the currency exchange rates have arrived.
 function TradeQueryClass:ConvertCurrencyToChaos(currencyId, amount)
 	if not amount then return nil end
 	if currencyId == "chaos" then return amount end
 	local divs = self:ConvertCurrencyToDivs(currencyId, amount)
-	local chaosPerDiv = self.pbCurrencyConversion[self.pbLeague]
-		and self.pbCurrencyConversion[self.pbLeague]["chaos"]
+	local rates = self.pbCurrencyConversion[self.pbRealm] and self.pbCurrencyConversion[self.pbRealm][self.pbLeague]
+	local chaosPerDiv = rates and rates["chaos"]
 	if divs and chaosPerDiv and chaosPerDiv > 0 then
 		return divs / chaosPerDiv
 	end
@@ -1490,7 +1490,7 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 				why = why .. s_format("^1%s%s", first,
 					#searchState.errors > 1 and s_format(" (+%d more)", #searchState.errors - 1) or "")
 			elseif skipped > 0 then
-				why = why .. s_format("^1All %d listing(s) were priced in a currency with no known rate - press \"Get Currency Conversion Rates\".", skipped)
+				why = why .. s_format("^1All %d listing(s) were priced in a currency with no known rate - the exchange rates have not arrived yet, try again shortly.", skipped)
 			else
 				why = why .. "^1The searches returned nothing for these slots. Try a larger budget, a lower resistance requirement, or fewer slots (the requirement is split across them)."
 			end
