@@ -120,6 +120,8 @@ local function getStatEntries(modType)
 		["Rune"] = "rune",
 		["HeartOfTheWell"] = "explicit",
 		["AgainstTheDarkness"] = "explicit",
+		["pseudo"] = "pseudo",
+		["Enchant"] = "enchant",
 	}
 	if tradeStatCategoryIndices[modType] then
 		for _, cat in ipairs(tradeStats) do
@@ -145,7 +147,7 @@ local eldritchModSlots = {
 	["Boots"] = true
 }
 
-local MAX_FILTERS = 35
+local MAX_FILTERS = 36
 
 local function logToFile(...)
 	ConPrintf(...)
@@ -232,6 +234,9 @@ function TradeQueryGeneratorClass:ProcessMod(modId, mod, tradeQueryStatsParsed, 
 		elseif modLine == "Flasks gain a Charge every 3 seconds" then
 			specialCaseData.overrideModLineSingular = "Flasks gain a Charge every 3 seconds"
 			modLine = "Flasks gain 1 Charges every 3 seconds"
+		elseif modLine:match("^Utility Flasks gain %d+ Charges every 3 seconds$") then
+			specialCaseData.overrideModLine = "Utility Flasks gain # Charges every 3 seconds"
+			modLine = modLine:gsub("Charges", "Charge")
 		end
 
 		-- If this is the first tier for this mod, find matching trade mod and init the entry
@@ -412,6 +417,7 @@ function TradeQueryGeneratorClass:InitMods()
 	self.modData = {
 		["Explicit"] = { },
 		["Implicit"] = { },
+		["Enchant"] = {},
 		["Corrupted"] = { },
 		["Scourge"] = { },
 		["Eater"] = { },
@@ -484,33 +490,40 @@ function TradeQueryGeneratorClass:InitMods()
 		{ ["AnyJewel"] = "AnyJewel" })
 
 	-- implicit mods
+	local function processBaseMod(baseEntry, modId, modType)
+		local mod = copyTable(data.itemMods.ItemExclusive[modId] or error("mod id doesn't exist " .. modId))
+		mod.type = modType
+
+		-- create trade type mask for base type
+		local maskOverride = {}
+		for tradeName, typeNames in pairs(tradeCategoryNames) do
+			for _, typeName in ipairs(typeNames) do
+				local entryName = baseEntry.type
+				if modType == "Implicit" and baseEntry.subType then
+					entryName = entryName .. ": " .. baseEntry.subType
+				end
+				if typeName == entryName then
+					maskOverride[tradeName] = true;
+					break
+				end
+			end
+		end
+
+		-- A mask avoids processing mods from unimplemented base types
+		if next(maskOverride) ~= nil then
+			self:ProcessMod("", mod, tradeQueryStatsParsed, regularItemMask, maskOverride)
+		end
+	end
 	for _, entry in pairsSortByKey(data.itemBases) do
 		if entry.type == "Graft" then
 			goto continue
 		end
 		for _, modId in ipairs(entry.implicitIds or {}) do
-			local mod = copyTable(data.itemMods.ItemExclusive[modId] or error("mod id doesn't exist " .. modId))
-			mod.type = "Implicit"
-
-			-- create trade type mask for base type
-			local maskOverride = {}
-			for tradeName, typeNames in pairs(tradeCategoryNames) do
-				for _, typeName in ipairs(typeNames) do
-					local entryName = entry.type
-					if entry.subType then
-						entryName = entryName .. ": " .. entry.subType
-					end
-					if typeName == entryName then
-						maskOverride[tradeName] = true;
-						break
-					end
-				end
-			end
-
-			-- mask found process implicit mod this avoids processing unimplemented bases
-			if next(maskOverride) ~= nil then
-				self:ProcessMod("", mod, tradeQueryStatsParsed, regularItemMask, maskOverride)
-			end
+			processBaseMod(entry, modId, "Implicit")
+		end
+		-- talismans have implicit-like enchants on the bases
+		for _, modId in ipairs(entry.enchantIds or {}) do
+			processBaseMod(entry, modId, "Enchant")
 		end
 		::continue::
 	end
@@ -786,6 +799,9 @@ function TradeQueryGeneratorClass:ExecuteQuery()
 	if self.calcContext.options.includeCorrupted then
 		self:GenerateModWeights(self.modData["Corrupted"])
 	end
+	if self.calcContext.options.includeTalisman then
+		self:GenerateModWeights(self.modData["Enchant"])
+	end
 	if self.calcContext.options.includeScourge then
 		self:GenerateModWeights(self.modData["Scourge"])
 	end
@@ -948,19 +964,71 @@ function TradeQueryGeneratorClass:FinishQuery()
 	if options.sockets and options.sockets > 0 then
 		num_extra = num_extra + 1
 	end
+	if options.links and options.links > 0 then
+		num_extra = num_extra + 1
+	end
 
 	local effective_max = MAX_FILTERS - num_extra
 
-	local prioritizedMods = {}
-	for _, entry in ipairs(self.modWeights) do
-		if #prioritizedMods < effective_max then
-			table.insert(prioritizedMods, entry)
-		else
-			break
+	local pseudoMap = {
+		["3372524247"] = "pseudo.pseudo_total_fire_resistance",
+		["4220027924"] = "pseudo.pseudo_total_cold_resistance",
+		["1671376347"] = "pseudo.pseudo_total_lightning_resistance",
+		["2923486259"] = "pseudo.pseudo_total_chaos_resistance",
+		["4080418644"] = "pseudo.pseudo_total_strength",
+		["3261801346"] = "pseudo.pseudo_total_dexterity",
+		["328541901"] = "pseudo.pseudo_total_intelligence",
+	}
+	local ignoredStats = {
+		-- % all resistances
+		["2901986750"] = true,
+		-- all attributes
+		["1379411836"] = true,
+		["2897413282"] = true,
+	}
+	-- block all hybrid resistance stats
+	local resElements = { "fire", "cold", "lightning", "chaos" }
+	for _, elem1 in ipairs(resElements) do
+		for _, elem2 in ipairs(resElements) do
+			local stats = { string.format("%s_and_%s_damage_resistance_%%", elem1, elem2) }
+			ignoredStats[tostring(HashStats(stats))] = true
 		end
 	end
+	-- block all hybrid attribute stats
+	local attributeElements = { "dexterity", "strength", "intelligence" }
+	for _, elem1 in ipairs(attributeElements) do
+		for _, elem2 in ipairs(attributeElements) do
+			local stats = { string.format("base_%s_and_%s", elem1, elem2) }
+			ignoredStats[tostring(HashStats(stats))] = true
+			stats = { string.format("additional_%s_and_%s", elem1, elem2) }
+			ignoredStats[tostring(HashStats(stats))] = true
+		end
+	end
+	local statFilters = {}
+	local pseudoMods = {}
+	for _, entry in ipairs(self.modWeights) do
+		local hash = entry.tradeModId:match("stat_(%d+)")
+		local filterEntry = { id = entry.tradeModId, value = { weight = (entry.invert == true and entry.weight * -1 or entry.weight) } }
+		-- avoid adding hybrid stats since we get the weight for them from
+		-- individual stats
+		if ignoredStats[hash] then
+			goto weightContinue
+		elseif pseudoMap[hash] then
+			local tradeId = pseudoMap[hash]
+			filterEntry.id = tradeId
+			-- avoid adding duplicate pseudo filters: update existing
+			if pseudoMods[tradeId] then
+				pseudoMods[tradeId].value.weight = math.max(filterEntry.value.weight, pseudoMods[tradeId].value.weight)
+			else
+				pseudoMods[tradeId] = filterEntry
+				table.insert(statFilters, filterEntry)
+			end
+		else
+			table.insert(statFilters, filterEntry)
+		end
 
-	self.modWeights = prioritizedMods
+		::weightContinue::
+	end
 
 	for k, v in pairs(self.calcContext.special.queryExtra or {}) do
 		queryTable.query[k] = v
@@ -981,8 +1049,8 @@ function TradeQueryGeneratorClass:FinishQuery()
 		t_insert(queryTable.query.stats, andFilters)
 	end
 	
-	for _, entry in ipairs(self.modWeights) do
-		t_insert(queryTable.query.stats[1].filters, { id = entry.tradeModId, value = { weight = (entry.invert == true and entry.weight * -1 or entry.weight) } })
+	for _, entry in ipairs(statFilters) do
+		t_insert(queryTable.query.stats[1].filters, entry)
 		filters = filters + 1
 		if filters == effective_max then
 			break
@@ -1138,8 +1206,8 @@ function TradeQueryGeneratorClass:RequestQuery(slot, context, statWeights, callb
 	end
 
 	if isAmuletSlot then
-		controls.includeTalisman = new("CheckBoxControl", {"TOPRIGHT",lastItemAnchor,"BOTTOMRIGHT"}, {0, 5, 18}, "Talisman Mods:", function(state) end)
-		controls.includeTalisman.state = (self.lastIncludeTalisman == nil or self.lastIncludeTalisman == true)
+		controls.includeTalisman = new("CheckBoxControl", { "TOPRIGHT", lastItemAnchor, "BOTTOMRIGHT" }, { 0, 5, 18 }, "Talisman Mods:", function(state) end, "Whether talisman enchant mods should be included. Disabled by default due to the maximum filter limit.")
+		controls.includeTalisman.state = not not self.lastIncludeTalisman
 		updateLastAnchor(controls.includeTalisman)
 	end
 
@@ -1408,6 +1476,25 @@ Remove: %s will be removed from the search results.]], term, term, term)
 				end
 			end
 		end
+		local pseudoStats = getStatEntries("pseudo")
+		-- map stats and such which are clearly not relevant here
+		local ignoredStats = {
+			"^pseudo.lake",
+			"^pseudo.pseudo_lake",
+			"^pseudo.pseudo_logbook",
+			"^pseudo.pseudo_temple",
+			"^pseudo.pseudo_map",
+			"^pseudo.pseudo_ritual",
+		}
+		for _, entry in ipairs(pseudoStats or {}) do
+			for _, ignored in ipairs(ignoredStats) do
+				if entry.id:find(ignored) then
+					goto pseudoContinue
+				end
+			end
+			t_insert(mods, { label = s_format("^7%s (Pseudo)", entry.text), tradeId = entry.id })
+			::pseudoContinue::
+		end
 		return mods
 	end
 	-- amount of mod selectors: technically we could have 40, but the more we have the fewer
@@ -1449,7 +1536,7 @@ Remove: %s will be removed from the search results.]], term, term, term)
 					selectedMods[i] = copyTable(val)
 				end
 				setModSelectors(controls)
-			end)
+			end, nil, true)
 		dropdown.shown = function()
 			return not not selectedMods[i - 1] or i == 1
 		end

@@ -668,10 +668,10 @@ local skills, mod, flag, skill = ...
 #skill SupportMinionPact
 	statMap = {
 		["spell_minimum_added_physical_damage_per_active_permanent_minion"] = {
-			mod("PhysicalMin", "BASE", nil, 0, 0, { type = "Multiplier", var = "SummonedMinion" }),
+			mod("PhysicalMin", "BASE", nil, 0, 0, { type = "Multiplier", var = "PermanentMinion" }),
 		},
 		["spell_maximum_added_physical_damage_per_active_permanent_minion"] = {
-			mod("PhysicalMax", "BASE", nil, 0, 0, { type = "Multiplier", var = "SummonedMinion" }),
+			mod("PhysicalMax", "BASE", nil, 0, 0, { type = "Multiplier", var = "PermanentMinion" }),
 		},
 	},
 #mods
@@ -828,7 +828,8 @@ local skills, mod, flag, skill = ...
 #skill SupportScornfulHerald
 	statMap = {
 		["herald_no_buff_effect"] = {
-			flag("DisableBuff", { type = "SkillType", skillType = SkillType.Herald }),
+			mod("BuffEffect", "MORE", nil, 0, 0, { type = "SkillType", skillType = SkillType.Herald }),
+			value = -100,
 		},
 	},
 #mods

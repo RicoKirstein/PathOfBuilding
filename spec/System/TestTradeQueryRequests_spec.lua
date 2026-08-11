@@ -204,8 +204,10 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 						account = { name = "seller" },
 					},
 					item = {
-						extended = { text = "VGVzdCBJdGVt" },
 						pseudoMods = pseudoMods,
+						rarity = "Rare",
+						name = "Test Subject",
+						typeLine = "Astral Plate",
 					},
 				}
 			end
@@ -284,7 +286,7 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 					whisper = "hi",
 					account = { name = "seller" }
 				},
-				item = { extended = { text = common.base64.encode("Test Item") }, pseudoMods = pseudoMods }
+				item = { rarity = "Rare", name = "", typeLine = "Test Item", pseudoMods = pseudoMods }
 			}
 		end
 
@@ -331,7 +333,7 @@ Strict-Transport-Security: max-age=63115200; includeSubDomains; preload]]
 			assert.are.equal("0", byId.absent.weight)
 			assert.are.equal("0", byId.empty.weight)
 			assert.are.equal("123.4", byId.weighted.weight)
-			assert.are.equal("Test Item", byId.weighted.item_string)
+			assert.are.equal("Rarity: Rare\nTest Item\nImplicits: 0", byId.weighted.item_string)
 			assert.are.equal("seller", byId.weighted.trader)
 		end)
 	end)

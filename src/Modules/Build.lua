@@ -679,6 +679,8 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 		self.configTab:ImportCalcSettings()
 	end
 
+	-- reprocess socket groups as they might depend on items which don't necessarily load first.
+	self.skillsTab:UpdateSocketGroups()
 	-- Build calculation output tables
 	wipeGlobalCache()
 	self.outputRevision = 1
@@ -1159,12 +1161,14 @@ function buildMode:PerformRecalc()
 	-- Rebuild calculation output tables
 	self.outputRevision = self.outputRevision + 1
 	self.buildFlag = false
+	self.skillsTab:UpdateSocketGroups()
 	local recalcStart = GetTime()
 	self.calcsTab:BuildOutput()
 	self:RefreshStatList()
 	if main.workerPool then
 		main.workerPool:LogMainRecalc(GetTime() - recalcStart)
 	end
+	self.configTab.calcFunc, self.configTab.calcBase = self.calcsTab:GetMiscCalculator(self)
 	return true
 end
 
