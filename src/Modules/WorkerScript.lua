@@ -36,6 +36,11 @@ local rawOpen = io.open
 function io.open(name, mode)
 	return rawOpen(resolve(name), mode)
 end
+-- The calc modules load each other with require since the class rework, and
+-- require searches package.path: the host gives the main state a path that
+-- includes the script directory, but a subscript state does not get one, so
+-- without this the environment load dies at require("Modules.CalcBase")
+package.path = srcPath .. "/?.lua;" .. package.path
 
 -- HeadlessWrapper replaces the whole host API with stubs, including file
 -- functions a subscript genuinely has. Keep the real ones and put them back
