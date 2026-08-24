@@ -372,9 +372,7 @@ function main:SaveModCache()
 				out:write("end)();(function()\n")
 				count = 0
 			else
-				-- plain form: the system LuaJIT running the headless harness predates
-				-- compound-assignment support (added upstream in LuaJIT mid-2026)
-				count = count + 1
+				count += 1
 			end
 		end
 	end
