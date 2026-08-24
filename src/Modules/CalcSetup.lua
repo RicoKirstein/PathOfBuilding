@@ -488,6 +488,12 @@ function calcs.initEnv(build, mode, override, specEnv)
 		env.mode = mode
 		env.buildBreakdown = mode == "MAIN" or mode == "CALCS"
 		env.spec = override.spec or build.spec
+		-- A spec other than the active one may never have had its load-time rebuild
+		-- run (see Build:Init), and calculating with one that hasn't reads paths and
+		-- allocation counts that are not there yet. Callers that hand over a spec --
+		-- the tree list tooltip, tree comparisons -- get it built here rather than
+		-- each having to remember
+		env.spec:EnsureBuilt()
 		env.override = override
 		env.classId = env.spec.curClassId
 

@@ -552,6 +552,7 @@ function TreeTabClass:SetActiveSpec(specId)
 	local curSpec = self.specList[self.activeSpec]
 	data.setJewelRadiiGlobally(curSpec.treeVersion)
 	self.build.spec = curSpec
+	curSpec:EnsureBuilt()
 	self.build.buildFlag = true
 	self.build.spec:SetWindowTitleWithBuildClass()
 	self.build:UpdateClassDropdowns(curSpec.treeVersion)
@@ -587,7 +588,9 @@ end
 function TreeTabClass:SetCompareSpec(specId)
 	self.activeCompareSpec = m_min(specId, #self.specList)
 	local curSpec = self.specList[self.activeCompareSpec]
-
+	if curSpec then
+		curSpec:EnsureBuilt()
+	end
 	self.compareSpec = curSpec
 end
 

@@ -1159,7 +1159,8 @@ end
 -- Calculates the build with `gemData` staged into group.gemList[index], restoring
 -- the previous state afterwards, and returns the output plus the gem instance it
 -- staged. Existing gems keep their own quality and enablement; empty slots get a
--- default instance. Used by the gem dropdown (GemSelectControl:CalcOutputWithThisGem).
+-- default instance. Shared by the gem dropdown (GemSelectControl:CalcOutputWithThisGem)
+-- and the calculation pool workers (WorkerJobs gemDps), which must agree exactly.
 function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFullDPS, imbued)
 	local gemList = group.gemList
 	local displayGemList = group.displayGemList
@@ -1205,7 +1206,8 @@ function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFu
 	return output, gemInstance
 end
 
--- The output value the gem dropdown sorts by
+-- The output value the gem dropdown sorts by; shared by its synchronous sort
+-- and the calculation pool workers
 function SkillsTabClass.ExtractGemDps(output, dpsField)
 	return (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
 end

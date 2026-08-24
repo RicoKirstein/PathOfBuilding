@@ -480,8 +480,12 @@ function CalcsTabClass:BuildPower()
 	end
 	if self.powerBuilder then
 		local res, errMsg = coroutine.resume(self.powerBuilder, self)
-		if launch.devMode and not res then
-			error(errMsg)
+		if not res then
+			-- A dead builder otherwise just leaves the tree uncoloured with no trace
+			ConPrintf("PowerBuilder failed: %s", tostring(errMsg))
+			if launch.devMode then
+				error(errMsg)
+			end
 		end
 		if coroutine.status(self.powerBuilder) == "dead" then
 			self.powerBuilder = nil
@@ -493,74 +497,118 @@ function CalcsTabClass:BuildPower()
 end
 
 -- Estimate the offensive and defensive power of all unallocated nodes
-function CalcsTabClass:PowerBuilder()
-	-- local timer_start = GetTime()
-	local useFullDPS = self.powerStat and self.powerStat.stat == "FullDPS"
-	local calcFunc, calcBase = self:GetMiscCalculator()
-	local cache = { }
-	local distanceMap = { }
-	local distanceList = { }
-	local masteryNodeList = { }
-	local newPowerMax = {
-		singleStat = 0,
-		offence = 0,
-		offencePerPoint = 0,
-		defence = 0,
-		defencePerPoint = 0
+-- A tree node with the given mastery effect's stats applied, as used to
+-- evaluate assigning that effect
+function CalcsTabClass.BuildMasteryEffectNode(spec, node, effect)
+	local effectNode = {
+		id = node.id,
+		type = node.type,
+		name = node.name,
+		sd = { },
 	}
-	if not self.powerMax then
-		self.powerMax = newPowerMax
+	for i, sd in ipairs(effect.sd or { }) do
+		effectNode.sd[i] = sd
 	end
-	if coroutine.running() then
-		coroutine.yield()
-	end
+	spec.tree:ProcessStats(effectNode)
+	return effectNode
+end
 
-	local function buildMasteryEffectNode(node, effect)
-		local effectNode = {
-			id = node.id,
-			type = node.type,
-			name = node.name,
-			sd = { },
-		}
-		for i, sd in ipairs(effect.sd or { }) do
-			effectNode.sd[i] = sd
+-- Builds the calculation override for one node-power evaluation key; lives
+-- next to the PowerBuilder code that generates the keys, and is used by the
+-- calculation pool workers (WorkerJobs nodePower) to interpret them, so the
+-- two sides cannot drift. Keys: "123" adds node 123, "r123" removes allocated
+-- node 123, "m123/456" tries mastery effect 456 on mastery node 123, "c<name>"
+-- adds the cluster notable by name, "p123" removes allocated node 123 plus its
+-- dependents, "a123" adds node 123 plus its path, "M123/456" tries mastery
+-- effect 456 on node 123 plus the node's path. Returns the override and the
+-- node it evaluates.
+function CalcsTabClass.BuildNodePowerOverride(spec, key)
+	key = tostring(key)
+	local removeId = key:match("^r(%d+)$")
+	local masteryId, effectId = key:match("^m(%d+)/(%d+)$")
+	local pathId = key:match("^a(%d+)$")
+	local pathMasteryId, pathEffectId = key:match("^M(%d+)/(%d+)$")
+	if pathId then
+		local node = spec.nodes[tonumber(pathId)]
+		if node and node.path then
+			local pathNodes = { }
+			for _, pathNode in pairs(node.path) do
+				pathNodes[pathNode] = true
+			end
+			return { addNodes = pathNodes }, node
 		end
-		self.build.spec.tree:ProcessStats(effectNode)
-		return effectNode
-	end
-
-	local function masteryEffectCanBeAssignedToNode(node, masteryEffect)
-		local assignedNodeId = isValueInTable(self.build.spec.masterySelections, masteryEffect.effect)
-		return not assignedNodeId or assignedNodeId == node.id
-	end
-
-	local function calculateAddNodePower(power, distance, node, output, buildPathNodes)
-		if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
-			power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
-			if node.path and not node.ascendancyName then
-				newPowerMax.singleStat = m_max(newPowerMax.singleStat, power.singleStat)
-				power.pathPower = power.singleStat
-				if distance > 1 then
-					power.pathPower = self:CalculatePowerStat(self.powerStat, calcFunc({ addNodes = buildPathNodes() }, useFullDPS), calcBase)
+	elseif pathMasteryId then
+		local node = spec.nodes[tonumber(pathMasteryId)]
+		local effect = spec.tree.masteryEffects[tonumber(pathEffectId)]
+		if node and node.path and effect then
+			local effectNode = CalcsTabClass.BuildMasteryEffectNode(spec, node, effect)
+			local pathNodes = { [effectNode] = true }
+			for _, pathNode in pairs(node.path) do
+				if pathNode ~= node then
+					pathNodes[pathNode] = true
 				end
 			end
-		elseif not self.powerStat or not self.powerStat.ignoreForNodes then
-			power.offence, power.defence = self:CalculateCombinedOffDefStat(output, calcBase)
-			power.singleStat = power.offence
-			if node.path and not node.ascendancyName then
-				newPowerMax.offence = m_max(newPowerMax.offence, power.offence)
-				newPowerMax.defence = m_max(newPowerMax.defence, power.defence)
-				newPowerMax.offencePerPoint = m_max(newPowerMax.offencePerPoint, power.offence / distance)
-				newPowerMax.defencePerPoint = m_max(newPowerMax.defencePerPoint, power.defence / distance)
+			return { addNodes = pathNodes }, effectNode
+		end
+	elseif removeId then
+		local node = spec.nodes[tonumber(removeId)]
+		if node then
+			return { removeNodes = { [node] = true } }, node
+		end
+	elseif masteryId then
+		local node = spec.nodes[tonumber(masteryId)]
+		local effect = spec.tree.masteryEffects[tonumber(effectId)]
+		if node and effect then
+			local effectNode = CalcsTabClass.BuildMasteryEffectNode(spec, node, effect)
+			return { addNodes = { [effectNode] = true } }, effectNode
+		end
+	elseif key:byte(1) == 99 then -- "c<name>": cluster notable by name
+		local node = spec.tree.clusterNodeMap[key:sub(2)]
+		if node then
+			return { addNodes = { [node] = true } }, node
+		end
+	elseif key:byte(1) == 112 then -- "p<id>": allocated node plus its dependents removed
+		local node = spec.nodes[tonumber(key:sub(2))]
+		if node and node.depends then
+			local pathNodes = { }
+			for _, depNode in ipairs(node.depends) do
+				pathNodes[depNode] = true
 			end
+			return { removeNodes = pathNodes }, node
+		end
+	else
+		local node = spec.nodes[tonumber(key)]
+		if node then
+			return { addNodes = { [node] = true } }, node
 		end
 	end
-	
-	local start = GetTime()
-	local nodeIndex = 0
-	local total = 0
+end
 
-	for nodeId, node in pairs(self.build.spec.nodes) do
+-- Whether a mastery effect could be assigned to this node (it is unassigned, or
+-- already assigned here); shared by the node power prefetch and consumer loop
+function CalcsTabClass:MasteryEffectCanBeAssignedToNode(node, masteryEffect)
+	local assignedNodeId = isValueInTable(self.build.spec.masterySelections, masteryEffect.effect)
+	return not assignedNodeId or assignedNodeId == node.id
+end
+
+-- One pass over the tree that decides everything a power rebuild will
+-- evaluate: which nodes at what (jewel-adjusted) distance, which mastery
+-- effects, which cluster notables, the worker evaluation key for each unit,
+-- and the unit count for progress reporting. The worker prefetch ships
+-- plan.ids and the calculation loops walk the same plan's structures, so the
+-- eligibility rules exist only here. Also resets every node's power table for
+-- the rebuild.
+function CalcsTabClass:BuildNodePowerPlan()
+	local spec = self.build.spec
+	local plan = {
+		distanceList = { },	-- ascending { distance, nodes }, capped at nodePowerMaxDepth
+		masteryNodes = { },	-- mastery nodes whose effects get evaluated
+		clusterNodes = { },	-- eligible cluster notables, by name
+		ids = { },			-- every evaluation key, in consumption order
+		total = 0,
+	}
+	local distanceMap = { }
+	for nodeId, node in pairs(spec.nodes) do
 		wipeTable(node.power)
 		if node.type == "Mastery" then
 			node.power.masteryEffects = { }
@@ -568,10 +616,10 @@ function CalcsTabClass:PowerBuilder()
 		if node.modKey ~= "" and not self.mainEnv.grantedPassives[nodeId] then
 			if node.type == "Mastery" and node.allMasteryOptions then
 				if not (self.nodePowerMaxDepth and self.nodePowerMaxDepth < node.pathDist) then
-					t_insert(masteryNodeList, node)
+					t_insert(plan.masteryNodes, node)
 					for _, masteryEffect in ipairs(node.masteryEffects or { }) do
-						if masteryEffectCanBeAssignedToNode(node, masteryEffect) then
-							total = total + 1
+						if self:MasteryEffectCanBeAssignedToNode(node, masteryEffect) then
+							plan.total = plan.total + 1
 						end
 					end
 				end
@@ -586,105 +634,281 @@ function CalcsTabClass:PowerBuilder()
 				distanceMap[dist][nodeId] = node
 				node.power.distance = dist
 				if (not self.nodePowerMaxDepth) or dist <= self.nodePowerMaxDepth then
-					total = total + 1
+					plan.total = plan.total + 1
 				end
 			end
 		end
 	end
 	for distance, nodes in pairs(distanceMap) do
-		t_insert(distanceList, { distance, nodes })
+		if (not self.nodePowerMaxDepth) or distance <= self.nodePowerMaxDepth then
+			t_insert(plan.distanceList, { distance, nodes })
+		end
 	end
-	distanceMap = nil
-	table.sort(distanceList, function(a, b) return a[1] < b[1] end)
-	-- Count eligible cluster nodes
-	for _, node in pairs(self.build.spec.tree.clusterNodeMap) do
+	table.sort(plan.distanceList, function(a, b) return a[1] < b[1] end)
+	for nodeName, node in pairs(spec.tree.clusterNodeMap) do
+		if not node.power then
+			node.power = {}
+		end
+		wipeTable(node.power)
 		if not node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[node.id] then
-			total = total + 1
+			plan.clusterNodes[nodeName] = node
+			plan.total = plan.total + 1
 		end
 	end
-
-	for _, data in ipairs(distanceList) do
-		local distance, nodes = data[1], data[2]
-		if self.nodePowerMaxDepth and self.nodePowerMaxDepth < distance then
-			break
-		end
-		for nodeId, node in pairs(nodes) do
-			if not node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[nodeId] then
-				if not cache[node.modKey] then
-					cache[node.modKey] = calcFunc({ addNodes = { [node] = true } }, useFullDPS)
+	-- Evaluation keys in the order the loops consume them, so pooled results
+	-- stream in roughly as they are needed
+	local wantsPathPower = self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes
+	plan.nodeKeys = { }
+	local function planKey(node, key)
+		-- Always a string: results come back through JSON, so every key in
+		-- batch.results is one, and the consumer's readiness check compares
+		-- against these. A numeric key would never match, and the map would wait
+		-- for the whole batch instead of consuming shards as they arrive.
+		key = tostring(key)
+		t_insert(plan.ids, key)
+		plan.nodeKeys[node] = plan.nodeKeys[node] or { }
+		t_insert(plan.nodeKeys[node], key)
+	end
+	for _, entry in ipairs(plan.distanceList) do
+		for nodeId, node in pairs(entry[2]) do
+			if not node.alloc then
+				planKey(node, nodeId)
+				if wantsPathPower and entry[1] > 1 and node.path and not node.ascendancyName then
+					planKey(node, "a" .. nodeId)
 				end
-				local output = cache[node.modKey]
-				calculateAddNodePower(node.power, distance, node, output, function()
-					local pathNodes = { }
-					for _, pathNode in pairs(node.path) do
-						pathNodes[pathNode] = true
-					end
-					return pathNodes
-				end)
-			elseif node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[nodeId] then
-				if not cache[node.modKey.."_remove"] then
-					cache[node.modKey.."_remove"] = calcFunc({ removeNodes = { [node] = true } }, useFullDPS)
+			else
+				planKey(node, "r" .. nodeId)
+				if wantsPathPower and node.depends and not node.ascendancyName and #node.depends > 1 then
+					planKey(node, "p" .. nodeId)
 				end
-				local output = cache[node.modKey.."_remove"]
-				if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
-					node.power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
-					if node.depends and not node.ascendancyName then
-						node.power.pathPower = node.power.singleStat
-						local pathNodes = { }
-						for _, node in pairs(node.depends) do
-							pathNodes[node] = true
-						end
-						if #node.depends > 1 then
-							node.power.pathPower = self:CalculatePowerStat(self.powerStat, calcFunc({ removeNodes = pathNodes }, useFullDPS), calcBase)
-						end
-					end
-				end
-			end
-			if node.type == "Mastery" then
-				local selectedEffectId = self.build.spec.masterySelections[node.id]
-				if selectedEffectId then
-					node.power.masteryEffects[selectedEffectId] = {
-						singleStat = node.power.singleStat,
-						pathPower = node.power.pathPower,
-						offence = node.power.offence,
-						defence = node.power.defence,
-					}
-				end
-			end
-			nodeIndex = nodeIndex + 1
-			if coroutine.running() and GetTime() - start > 100 then
-				if self.build.powerBuilderProgressCallback then
-					self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
-				end
-				coroutine.yield()
-				start = GetTime()
 			end
 		end
 	end
-
-	for _, node in ipairs(masteryNodeList) do
+	for _, node in ipairs(plan.masteryNodes) do
 		for _, masteryEffect in ipairs(node.masteryEffects or { }) do
-			if masteryEffectCanBeAssignedToNode(node, masteryEffect) then
+			if self:MasteryEffectCanBeAssignedToNode(node, masteryEffect) then
+				t_insert(plan.ids, "m" .. node.id .. "/" .. masteryEffect.effect)
+				if wantsPathPower and (node.pathDist or 1000) > 1 and node.path and not node.ascendancyName then
+					t_insert(plan.ids, "M" .. node.id .. "/" .. masteryEffect.effect)
+				end
+			end
+		end
+	end
+	for nodeName in pairs(plan.clusterNodes) do
+		t_insert(plan.ids, "c" .. nodeName)
+	end
+	return plan
+end
+
+-- The output values a node power evaluation must carry: everything the power
+-- calculations read from an output, whichever side computes it
+function CalcsTabClass:NodePowerStats()
+	local stats = { "LifeUnreserved", "Life", "Armour", "EnergyShield", "EnergyShieldRecoveryCap", "Evasion", "LifeRegenRecovery", "EnergyShieldRegenRecovery", "CombinedDPS" }
+	if self.powerStat and self.powerStat.stat then
+		t_insert(stats, self.powerStat.stat)
+	end
+	return stats
+end
+
+-- Submits the plan's whole workload to the worker pool; returns the batch,
+-- or nil when there is no usable pool
+function CalcsTabClass:SubmitNodePowerPrefetch(plan, useFullDPS)
+	local workerPool = main.workerPool
+	if not workerPool or not workerPool:IsAvailable() then
+		return nil
+	end
+	-- Small shards: a single node evaluation can run over a second on heavy
+	-- FullDPS builds, and a queued interactive batch (gem/item sort) can only
+	-- start once a worker finishes its current shard. The default sharding can
+	-- produce one fat shard per worker, pinning the whole pool for its duration.
+	local shards = workerPool:ShardList(plan.ids, "nodeIds", { stats = self:NodePowerStats(), useFullDPS = useFullDPS }, 2)
+	-- A rebuild supersedes any still-queued shards from the previous one
+	workerPool:CancelBatch(self.nodePowerPoolBatch)
+	local pooledOutputs = workerPool:SubmitBatch("nodePower", shards, {
+		-- Names the task in the pool log; a rebuild always resubmits, since the
+		-- caller has already thrown away the node power tables the old one fed
+		request = {
+			revision = self.build.outputRevision,
+			stat = self.powerStat and self.powerStat.stat or "combined",
+			units = #plan.ids,
+		},
+	})
+	self.nodePowerPoolBatch = pooledOutputs or nil
+	return pooledOutputs
+end
+
+-- Resolves one node power evaluation: the pooled result when the prefetch
+-- covered this key (waiting while its shard is still in flight; already-drawn
+-- results keep the tree responsive), a local calculation otherwise. Local
+-- calculations while a batch is live are counted: they mean BuildNodePowerPlan
+-- no longer agrees with the consumer loops, or workers died mid-batch, and the
+-- only other symptom would be the tree quietly lagging again.
+function CalcsTabClass:NodePowerResult(pooledOutputs, key, calcFunc, useFullDPS)
+	if pooledOutputs then
+		local pooled = pooledOutputs.results[key]
+		while not pooled and pooledOutputs.pending > 0 do
+			coroutine.yield()
+			pooled = pooledOutputs.results[key]
+		end
+		if pooled then
+			return pooled
+		end
+		pooledOutputs.localMisses = (pooledOutputs.localMisses or 0) + 1
+	end
+	return calcFunc(self.BuildNodePowerOverride(self.build.spec, key), useFullDPS)
+end
+
+function CalcsTabClass:PowerBuilder()
+	-- local timer_start = GetTime()
+	local useFullDPS = self.powerStat and self.powerStat.stat == "FullDPS"
+	local calcFunc, calcBase = self:GetMiscCalculator()
+	local cache = { }
+	local newPowerMax = {
+		singleStat = 0,
+		offence = 0,
+		offencePerPoint = 0,
+		defence = 0,
+		defencePerPoint = 0
+	}
+	if not self.powerMax then
+		self.powerMax = newPowerMax
+	end
+	if coroutine.running() then
+		coroutine.yield()
+	end
+
+	local function calculateAddNodePower(power, distance, node, output, getPathOutput)
+		if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
+			power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
+			if node.path and not node.ascendancyName then
+				newPowerMax.singleStat = m_max(newPowerMax.singleStat, power.singleStat)
+				power.pathPower = power.singleStat
+				if distance > 1 then
+					power.pathPower = self:CalculatePowerStat(self.powerStat, getPathOutput(), calcBase)
+				end
+			end
+		elseif not self.powerStat or not self.powerStat.ignoreForNodes then
+			power.offence, power.defence = self:CalculateCombinedOffDefStat(output, calcBase)
+			power.singleStat = power.offence
+			if node.path and not node.ascendancyName then
+				newPowerMax.offence = m_max(newPowerMax.offence, power.offence)
+				newPowerMax.defence = m_max(newPowerMax.defence, power.defence)
+				newPowerMax.offencePerPoint = m_max(newPowerMax.offencePerPoint, power.offence / distance)
+				newPowerMax.defencePerPoint = m_max(newPowerMax.defencePerPoint, power.defence / distance)
+			end
+		end
+	end
+	
+	-- Decide the whole workload once and prefetch it from the worker pool; the
+	-- loops below walk the same plan, consuming pooled results in place of
+	-- local calculations
+	local plan = self:BuildNodePowerPlan()
+	local pooledOutputs = self:SubmitNodePowerPrefetch(plan, useFullDPS)
+
+	-- With the pool doing the heavy work, keep main-thread time slices short so the
+	-- UI stays smooth; the old 100ms budget is only needed for all-local builds
+	local frameBudget = pooledOutputs and 15 or 100
+
+	local start = GetTime()
+	local nodeIndex = 0
+	local total = plan.total
+
+	-- One node's full processing: pooled results are guaranteed present by the
+	-- readiness check below whenever shards are still in flight
+	local function processNode(nodeId, node, distance)
+		if not node.alloc then
+			if not cache[node.modKey] then
+				cache[node.modKey] = self:NodePowerResult(pooledOutputs, tostring(nodeId), calcFunc, useFullDPS)
+			end
+			local output = cache[node.modKey]
+			calculateAddNodePower(node.power, distance, node, output, function()
+				return self:NodePowerResult(pooledOutputs, "a" .. nodeId, calcFunc, useFullDPS)
+			end)
+		else
+			if not cache[node.modKey.."_remove"] then
+				cache[node.modKey.."_remove"] = self:NodePowerResult(pooledOutputs, "r" .. nodeId, calcFunc, useFullDPS)
+			end
+			local output = cache[node.modKey.."_remove"]
+			if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
+				node.power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
+				if node.depends and not node.ascendancyName then
+					node.power.pathPower = node.power.singleStat
+					if #node.depends > 1 then
+						local pathOutput = self:NodePowerResult(pooledOutputs, "p" .. nodeId, calcFunc, useFullDPS)
+						node.power.pathPower = self:CalculatePowerStat(self.powerStat, pathOutput, calcBase)
+					end
+				end
+			end
+		end
+		if node.type == "Mastery" then
+			local selectedEffectId = self.build.spec.masterySelections[node.id]
+			if selectedEffectId then
+				node.power.masteryEffects[selectedEffectId] = {
+					singleStat = node.power.singleStat,
+					pathPower = node.power.pathPower,
+					offence = node.power.offence,
+					defence = node.power.defence,
+				}
+			end
+		end
+		nodeIndex = nodeIndex + 1
+		if coroutine.running() and GetTime() - start > frameBudget then
+			if self.build.powerBuilderProgressCallback then
+				self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
+			end
+			coroutine.yield()
+			start = GetTime()
+		end
+	end
+
+	for _, data in ipairs(plan.distanceList) do
+		local distance, nodes = data[1], data[2]
+		-- Process whatever has already arrived and revisit the rest next frame:
+		-- consuming in strict order would advance one node per frame while shards
+		-- are in flight, leaving the workers finished and the map crawling
+		local remaining
+		repeat
+			local source = remaining or nodes
+			remaining = nil
+			for nodeId, node in pairs(source) do
+				local ready = true
+				if pooledOutputs and pooledOutputs.pending > 0 then
+					for _, key in ipairs(plan.nodeKeys[node]) do
+						if not pooledOutputs.results[key] then
+							ready = false
+							break
+						end
+					end
+				end
+				if ready then
+					processNode(nodeId, node, distance)
+				else
+					remaining = remaining or { }
+					remaining[nodeId] = node
+				end
+			end
+			if remaining then
+				coroutine.yield()
+			end
+		until not remaining
+	end
+
+	for _, node in ipairs(plan.masteryNodes) do
+		for _, masteryEffect in ipairs(node.masteryEffects or { }) do
+			if self:MasteryEffectCanBeAssignedToNode(node, masteryEffect) then
 				local effect = self.build.spec.tree.masteryEffects[masteryEffect.effect]
 				if effect then
-					local effectNode = buildMasteryEffectNode(node, effect)
-					if effectNode.modKey ~= "" then
+					local key = "m" .. node.id .. "/" .. effect.id
+					local _, effectNode = self.BuildNodePowerOverride(self.build.spec, key)
+					if effectNode and effectNode.modKey ~= "" then
 						if not cache[effectNode.modKey] then
-							cache[effectNode.modKey] = calcFunc({ addNodes = { [effectNode] = true } }, useFullDPS)
+							cache[effectNode.modKey] = self:NodePowerResult(pooledOutputs, key, calcFunc, useFullDPS)
 						end
 						local output = cache[effectNode.modKey]
 						node.power.masteryEffects[effect.id] = { }
 						local effectPower = node.power.masteryEffects[effect.id]
 						calculateAddNodePower(effectPower, node.pathDist, node, output, function()
-							local pathNodes = {
-								[effectNode] = true
-							}
-							for _, pathNode in pairs(node.path) do
-								if pathNode ~= node then
-									pathNodes[pathNode] = true
-								end
-							end
-							return pathNodes
+							return self:NodePowerResult(pooledOutputs, "M" .. node.id .. "/" .. effect.id, calcFunc, useFullDPS)
 						end)
 						if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
 							effectPower.pathPower = effectPower.pathPower or effectPower.singleStat
@@ -697,7 +921,7 @@ function CalcsTabClass:PowerBuilder()
 						end
 					end
 					nodeIndex = nodeIndex + 1
-					if coroutine.running() and GetTime() - start > 100 then
+					if coroutine.running() and GetTime() - start > frameBudget then
 						if self.build.powerBuilderProgressCallback then
 							self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
 						end
@@ -711,28 +935,25 @@ function CalcsTabClass:PowerBuilder()
 
 	-- Calculate the impact of every cluster notable
 	-- used for the power report screen
-	for nodeName, node in pairs(self.build.spec.tree.clusterNodeMap) do
-		if not node.power then
-			node.power = {}
+	for nodeName, node in pairs(plan.clusterNodes) do
+		if not cache[node.modKey] then
+			cache[node.modKey] = self:NodePowerResult(pooledOutputs, "c" .. nodeName, calcFunc, useFullDPS)
 		end
-		wipeTable(node.power)
-		if not node.alloc and node.modKey ~= "" and not self.mainEnv.grantedPassives[node.id] then
-			if not cache[node.modKey] then
-				cache[node.modKey] = calcFunc({ addNodes = { [node] = true } }, useFullDPS)
-			end
-			local output = cache[node.modKey]
-			if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
-				node.power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
-			end
-			nodeIndex = nodeIndex + 1
-			if coroutine.running() and GetTime() - start > 100 then
-				if self.build.powerBuilderProgressCallback then
-					self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
-				end
-				coroutine.yield()
-				start = GetTime()
-			end
+		local output = cache[node.modKey]
+		if self.powerStat and self.powerStat.stat and not self.powerStat.ignoreForNodes then
+			node.power.singleStat = self:CalculatePowerStat(self.powerStat, output, calcBase)
 		end
+		nodeIndex = nodeIndex + 1
+		if coroutine.running() and GetTime() - start > frameBudget then
+			if self.build.powerBuilderProgressCallback then
+				self.build.powerBuilderProgressCallback(m_floor(nodeIndex/total*100))
+			end
+			coroutine.yield()
+			start = GetTime()
+		end
+	end
+	if pooledOutputs and (pooledOutputs.localMisses or 0) > 0 then
+		ConPrintf("PowerBuilder: %d of the evaluations ran on the main thread; the loops asked for a key BuildNodePowerPlan did not plan for, or workers failed mid-batch", pooledOutputs.localMisses)
 	end
 	self.powerMax = newPowerMax
 	self.powerBuilderInitialized = true

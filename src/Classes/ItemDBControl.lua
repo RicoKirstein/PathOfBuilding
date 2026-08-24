@@ -214,6 +214,11 @@ function ItemDBClass:BuildSortOrder()
 		if not stat.ignoreForItems then
 			t_insert(self.sortDropList, {
 				label="Sort by "..stat.label,
+				-- Index into data.powerStatList: what identifies this entry exactly
+				-- when a worker has to find it again, since `label` carries the
+				-- "Sort by " prefix. The list is built once from a literal at module
+				-- load, so the index means the same thing in every state.
+				statIndex=id,
 				sortMode=stat.itemField or stat.stat,
 				itemField=stat.itemField,
 				stat=stat.stat,
@@ -244,19 +249,86 @@ function ItemDBClass:ListBuilder()
 
 	if self.sortDetail and self.sortDetail.stat then -- stat-based
 		local useFullDPS = self.sortDetail.stat == "FullDPS"
-		local start = GetTime()
-		local calcFunc = self.itemsTab.build.calcsTab:GetMiscCalculator(self.build)
-		for itemIndex, item in ipairs(list) do
-			item.measuredPower = self.itemsTab:MeasureItemPower(item, self.sortDetail, calcFunc, useFullDPS) or -math.huge
-			local now = GetTime()
-			if now - start > 50 then
-				self.defaultText = "^7Sorting... ("..m_floor(itemIndex/#list*100).."%)"
-				coroutine.yield()
-				start = now
+		-- Spread the per-item calculations over the background worker pool when
+		-- available; this coroutine just waits for the merged results
+		local pool = main.workerPool
+		local measured = { }
+		if pool and pool:IsAvailable() then
+			local slots = self.itemsTab:GetEquippableSlotNames()
+			local units = { }
+			for i, item in ipairs(list) do
+				item.measuredPower = -math.huge
+				if item.raw then
+					t_insert(units, { key = tostring(i), value = item.raw })
+				end
+			end
+			-- Small fixed shards: they pipeline better across workers, give progress
+			-- updates, and bound how long anything queued behind them waits for a
+			-- worker; item evaluations can run hundreds of ms each
+			local shards = pool:ShardMap(units, "items", { statIndex = self.sortDetail.statIndex, slots = slots }, 4)
+			local batchDone = false
+			local batch
+			pool:CancelBatch(self.pendingSortBatch)
+			batch = pool:SubmitBatch("itemPower", shards, {
+				request = {
+					revision = self.itemsTab.build.outputRevision,
+					statIndex = self.sortDetail.statIndex,
+					units = #units,
+				},
+				onComplete = function(results)
+					for key, power in pairs(results) do
+						local item = list[tonumber(key)]
+						if item then
+							item.measuredPower = power
+							measured[item] = true
+						end
+					end
+					batchDone = true
+				end,
+				onProgress = function(done, total)
+					self.defaultText = "^7Sorting... ("..m_floor(done / total * 100).."%)"
+				end,
+				priority = true,
+			})
+			self.pendingSortBatch = batch or nil
+			if batch then
+				self.defaultText = "^7Sorting... (0%)"
+				while not batchDone do
+					coroutine.yield()
+				end
+				-- Whatever the task did not measure is still on its -inf
+				-- placeholder, and -inf sorts to the bottom looking like a genuine
+				-- measurement. The loop below fills those in either way; say so when
+				-- it is because something went wrong rather than because an item
+				-- fits no slot
+				if batch.state ~= "complete" or batch.errorCount > 0 then
+					ConPrintf("Item sort: batch %s finished %s with %d results and %d worker errors; measuring the rest on the main thread",
+						pool:DescribeBatch(batch), batch.state, batch.resultCount, batch.errorCount)
+				end
+			end
+		end
+		-- Measure whatever the pool did not, a slice per frame. With no pool that
+		-- is the whole list, which is what this has always done.
+		local pending = { }
+		for _, item in ipairs(list) do
+			if not measured[item] then
+				t_insert(pending, item)
+			end
+		end
+		if pending[1] then
+			local start = GetTime()
+			local calcFunc = self.itemsTab.build.calcsTab:GetMiscCalculator(self.build)
+			for itemIndex, item in ipairs(pending) do
+				item.measuredPower = self.itemsTab:MeasureItemPower(item, self.sortDetail, calcFunc, useFullDPS) or -math.huge
+				local now = GetTime()
+				if now - start > 50 then
+					self.defaultText = "^7Sorting... ("..m_floor(itemIndex/#pending*100).."%)"
+					coroutine.yield()
+					start = now
+				end
 			end
 		end
 	end
-
 	table.sort(list, function(a, b)
 		for _, data in ipairs(self.sortOrder) do
 			local aVal = a[data.key]

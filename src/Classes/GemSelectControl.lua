@@ -333,7 +333,110 @@ function GemSelectClass:UpdateSortCache()
 		sortCache.dpsColor[gemId] = ""
 	end
 
-	self.dpsBuildFlag = true
+	-- Spread the candidate calculations over the background worker pool when it is
+	-- available: the list shows up immediately and re-sorts as results stream in.
+	-- Without a pool, DPSBuilder computes them on this thread across frames instead.
+	if not self:SubmitSortBatch(sortCache) then
+		self.dpsBuildFlag = true
+	end
+end
+
+-- Submits the sort cache's pending candidates to the calculation pool. Returns
+-- the batch, or nil when there is no usable pool and the caller should fall back
+-- to sorting on this thread.
+function GemSelectClass:SubmitSortBatch(sortCache)
+	local pool = main.workerPool
+	if not pool or self.imbuedSelect or not self.skillsTab.sortGemsByDPS or #sortCache.pendingGems == 0 then
+		return nil
+	end
+	local groupIndex
+	for i, group in ipairs(self.skillsTab.socketGroupList) do
+		if group == self.skillsTab.displayGroup then
+			groupIndex = i
+			break
+		end
+	end
+	if not groupIndex or not pool:IsAvailable() then
+		return nil
+	end
+	-- What this task computes: every input the candidate calculations depend on.
+	-- The sort cache is rebuilt for changes that do not affect them, and
+	-- cancelling and resubmitting on each rebuild would keep the batch from ever
+	-- finishing, so an identical task already in flight is reused instead. Since
+	-- the match is on the whole descriptor, results computed against a different
+	-- build revision or a different gem in the slot are never taken for these.
+	local request = {
+		group = groupIndex,
+		index = self.index,
+		dps = tostring(sortCache.dpsField),
+		revision = sortCache.outputRevision,
+		level = tostring(sortCache.defaultLevel),
+		quality = tostring(sortCache.defaultQuality),
+		slotGem = tostring(sortCache.gemInstance),
+		units = #sortCache.pendingGems,
+	}
+	local inFlight = pool:FindBatch("gemDps", request)
+	if inFlight then
+		self.pendingGemBatch = inFlight
+		return inFlight
+	end
+	pool:CancelBatch(self.pendingGemBatch)
+	-- Tiny shards: a FullDPS gem evaluation can run into hundreds of ms, and the
+	-- visible list only starts improving once the first shards return
+	local shards = pool:ShardList(sortCache.pendingGems, "gemIds", {
+		groupIndex = groupIndex,
+		gemIndex = self.index,
+		dpsField = sortCache.dpsField,
+		defaultLevel = self.skillsTab.defaultGemLevel,
+		defaultQuality = self.skillsTab.defaultGemQuality,
+	}, 2)
+	local batch
+	local function applyResults(final)
+		local cache = self.sortCache
+		-- Only ever apply to the cache this task was submitted for; anything else
+		-- has moved on and these results no longer describe what is on screen
+		if not cache or self.pendingGemBatch ~= batch then
+			return
+		end
+		local applied = 0
+		for gemId, dps in pairs(batch.results) do
+			if cache.dps[gemId] then
+				applied = applied + 1
+				self:SetSortedDps(cache, gemId, dps)
+			end
+		end
+		if final then
+			self.pendingGemBatch = nil
+			-- A task that finished having measured nothing -- every worker errored,
+			-- or the fleet died and the batch was abandoned -- is an unsorted list
+			-- with no other symptom. Redo the work here rather than present an
+			-- order that means nothing.
+			if applied == 0 then
+				ConPrintf("Gem DPS sort: batch %s finished %s with %d results and %d worker errors; sorting on the main thread",
+					pool:DescribeBatch(batch), batch.state, batch.resultCount, batch.errorCount)
+				self.dpsBuildFlag = true
+				return
+			end
+			cache.pendingGems = nil
+		end
+		self:SortCurrentList()
+	end
+	batch = pool:SubmitBatch("gemDps", shards, {
+		request = request,
+		onComplete = function()
+			applyResults(true)
+		end,
+		-- Stream partial results in so the visible list improves while the rest
+		-- are still computing; the very first arrival re-sorts immediately
+		onProgress = function(done, total)
+			if done == 1 or done % 4 == 0 then
+				applyResults(false)
+			end
+		end,
+		priority = true,
+	})
+	self.pendingGemBatch = batch or nil
+	return batch
 end
 
 function GemSelectClass:SortGemList(gemList)
@@ -377,7 +480,8 @@ function GemSelectClass:SortCurrentList()
 end
 
 -- Records a candidate's measured DPS and its comparison colour against the
--- baseline
+-- baseline; shared by the main-thread sorter (DPSBuilder) and the worker pool
+-- result handler, which must colour identically
 function GemSelectClass:SetSortedDps(sortCache, gemId, dps)
 	sortCache.dps[gemId] = dps
 	if dps > sortCache.baseDPS then

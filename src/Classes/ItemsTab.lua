@@ -1214,6 +1214,10 @@ holding Shift will put it in the second.]])
 end
 
 function ItemsTabClass:Load(xml, dbFileName)
+	-- Wipe item state so loading fully replaces it: worker builds re-load this
+	-- section in place when it changes (see WorkerScript patch handler)
+	self.items = { }
+	wipeTable(self.itemOrderList)
 	self.activeItemSetId = 0
 	self.itemSets = { }
 	self.itemSetOrderList = { }
@@ -2558,7 +2562,7 @@ end
 -- Check if the given item could be equipped in the given slot, taking into account possible conflicts with currently equipped items
 -- For example, a shield is not valid for Weapon 2 if Weapon 1 is a staff, and a wand is not valid for Weapon 2 if Weapon 1 is a dagger
 -- Names of the slots an item could currently be equipped into (active slots of
--- the current weapon set); used by the item DB sort
+-- the current weapon set); shared by the item DB sort and the calculation pool
 function ItemsTabClass:GetEquippableSlotNames()
 	local slotNames = { }
 	for slotName, slot in pairs(self.slots) do
@@ -2570,8 +2574,9 @@ function ItemsTabClass:GetEquippableSlotNames()
 end
 
 -- Measured power of an item tried in each given slot (best value wins), as
--- sorted on by the item DB; returns nil if the item fits no slot. Used by
--- ItemDBControl:ListBuilder.
+-- sorted on by the item DB; returns nil if the item fits no slot. Shared by
+-- ItemDBControl:ListBuilder and the calculation pool workers (WorkerJobs
+-- itemPower), which must agree exactly.
 function ItemsTabClass:MeasureItemPower(item, statEntry, calcFunc, useFullDPS, slotNames)
 	local best
 	for _, slotName in ipairs(slotNames or self:GetEquippableSlotNames()) do

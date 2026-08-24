@@ -62,6 +62,15 @@ function main:Init()
 	self.modes["LIST"] = LoadModule("Modules/BuildList")
 	self.modes["BUILD"] = LoadModule("Modules/Build")
 
+	-- Background calculation workers; started lazily on first use (a stubbed
+	-- LaunchSubScript, e.g. headless, leaves the pool permanently unavailable)
+	if not POB_IS_WORKER then
+		self.workerPool = LoadModule("Modules/WorkerPool")
+		-- Prestart from the first frame (main state), so workers are warm before
+		-- the first sort instead of adding their spin-up to it
+		self.workerPool.startRequested = true
+	end
+
 	self.popups = { }
 	self.sharedItemList = { }
 	self.sharedItemSetList = { }
@@ -123,6 +132,7 @@ function main:Init()
 	self.showAnimations = true
 	self.showAllItemAffixes = true
 	self.disableScrollControlInteraction = false
+	self.workerPoolCount = 0
 	self.errorReadingSettings = false
 	
 	if not SetDPIScaleOverridePercent then SetDPIScaleOverridePercent = function(scale) end end
@@ -376,6 +386,10 @@ end
 
 function main:OnFrame()
 	self.screenW, self.screenH = GetVirtualScreenSize()
+
+	if self.workerPool then
+		self.workerPool:OnFrame()
+	end
 
 	if self.screenH > self.screenW then
 		self.portraitMode = true
@@ -673,6 +687,9 @@ function main:LoadSettings(ignoreBuild)
 					self.dpiScaleOverridePercent = tonumber(node.attrib.dpiScaleOverridePercent) or 0
 					SetDPIScaleOverridePercent(self.dpiScaleOverridePercent)
 				end
+				if node.attrib.workerPoolCount then
+					self.workerPoolCount = m_min(m_max(m_floor(tonumber(node.attrib.workerPoolCount) or 0), 0), 32)
+				end
 			end
 		end
 	end
@@ -806,6 +823,7 @@ function main:SaveSettings()
 		showAllItemAffixes = tostring(self.showAllItemAffixes),
 		disableScrollControlInteraction = tostring(self.disableScrollControlInteraction),
 		dpiScaleOverridePercent = tostring(self.dpiScaleOverridePercent),
+		workerPoolCount = tostring(self.workerPoolCount or 0),
 	} })
 	local res, errMsg = common.xml.SaveXMLFile(setXML, self.userPath.."Settings.xml")
 	if not res then
@@ -891,11 +909,12 @@ function main:OpenOptionsPopup(savedState)
 		showAnimations = self.showAnimations,
 		showAllItemAffixes = self.showAllItemAffixes,
 		disableScrollControlInteraction = self.disableScrollControlInteraction,
-		dpiScaleOverridePercent = self.dpiScaleOverridePercent
+		dpiScaleOverridePercent = self.dpiScaleOverridePercent,
+		workerPoolCount = self.workerPoolCount or 0
 	}
 
 	-- NOTE: Height needs to be adjusted if more menu options are added
-	local oneColumnHeightReq = 850 -- Min height required to not split menu into two columns
+	local oneColumnHeightReq = 877 -- Min height required to not split menu into two columns
 	local columnWidth = 600
 	
 	local startingY = 20
@@ -979,6 +998,39 @@ function main:OpenOptionsPopup(savedState)
 	controls.dpiScaleOverrideLabel = new("LabelControl"):LabelControl({ "RIGHT", controls.dpiScaleOverride, "LEFT" }, { defaultLabelSpacingPx, 0, 0, 16 }, "^7UI scaling override:")
 	controls.dpiScaleOverride.tooltipText = "Overrides Windows DPI scaling inside Path of Building.\nChoose a percentage between 100% and 250% or revert to the system default."
 	controls.dpiScaleOverride:SelByValue(self.dpiScaleOverridePercent, "percent")
+
+	nextRow()
+	local workerPoolOptions = { { label = "Disabled", count = 0 } }
+	for _, count in ipairs({ 2, 4, 6, 8, 12, 16, 24, 32 }) do
+		t_insert(workerPoolOptions, { label = string.format("%d workers", count), count = count })
+	end
+	-- A hand-edited settings value keeps its exact count
+	if self.workerPoolCount and self.workerPoolCount > 0 then
+		local found
+		for _, option in ipairs(workerPoolOptions) do
+			if option.count == self.workerPoolCount then
+				found = true
+				break
+			end
+		end
+		if not found then
+			t_insert(workerPoolOptions, { label = string.format("%d workers", self.workerPoolCount), count = self.workerPoolCount })
+		end
+	end
+	local function workerPoolRamLabel()
+		local count = self.workerPoolCount or 0
+		-- ~300 MB measured per worker: each holds a full copy of the program data
+		-- and the current build in its own Lua state
+		return count == 0 and "" or string.format("^8~%.1f GB RAM while running", count * 0.3)
+	end
+	controls.workerPoolCount = new("DropDownControl"):DropDownControl({ "TOPLEFT", controls.sectionAnchor, "TOPLEFT" }, { currentX + defaultLabelPlacementX, currentY, 150, 18 }, workerPoolOptions, function(index, value)
+		self.workerPoolCount = value.count
+		controls.workerPoolRam.label = workerPoolRamLabel()
+	end)
+	controls.workerPoolCountLabel = new("LabelControl"):LabelControl({ "RIGHT", controls.workerPoolCount, "LEFT" }, { defaultLabelSpacingPx, 0, 0, 16 }, "^7Background calculation workers:")
+	controls.workerPoolCount.tooltipText = "Background workers parallelize bulk calculations: gem and item DPS sorting and the tree heat map.\nEach worker is a background copy of the program and the current build, and holds around 300 MB for as long as it runs.\nThe workers start as soon as this is enabled and stay running, so the memory is in use whether or not you sort anything.\nWith the pool disabled these calculations run on the main thread and the interface freezes while they do.\nChanges apply when you press Save."
+	controls.workerPoolCount:SelByValue(self.workerPoolCount or 0, "count")
+	controls.workerPoolRam = new("LabelControl"):LabelControl({ "LEFT", controls.workerPoolCount, "RIGHT" }, { 8, 0, 0, 16 }, workerPoolRamLabel())
 
 	nextRow()
 	controls.buildPath = new("EditControl"):EditControl({ "TOPLEFT", controls.sectionAnchor, "TOPLEFT" }, { currentX + defaultLabelPlacementX, currentY, 290, 18 })
@@ -1220,6 +1272,9 @@ function main:OpenOptionsPopup(savedState)
 			main:SetManifestBranch(self.betaTest and "beta" or "master")
 		end
 		SetDPIScaleOverridePercent(self.dpiScaleOverridePercent)
+		if self.workerPool then
+			self.workerPool:ApplySettings()
+		end
 		main:ClosePopup()
 		main:SaveSettings()
 	end)
@@ -1254,6 +1309,7 @@ function main:OpenOptionsPopup(savedState)
 		self.disableScrollControlInteraction = savedState.disableScrollControlInteraction
 		self.dpiScaleOverridePercent = savedState.dpiScaleOverridePercent
 		SetDPIScaleOverridePercent(self.dpiScaleOverridePercent)
+		self.workerPoolCount = savedState.workerPoolCount
 		main:ClosePopup()
 	end)
 	

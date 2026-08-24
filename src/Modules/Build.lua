@@ -604,6 +604,10 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 	self.latestTree = main.tree[latestTreeVersion]
 	data.setJewelRadiiGlobally(latestTreeVersion)
 	self.data = data
+	-- Tab creation and section loading below trigger many redundant full
+	-- depends/paths rebuilds (one per spec, jewel socket and class-selection
+	-- step); defer them all into a single rebuild before the first calculation
+	self.deferSpecRebuild = true
 	self.importTab = new("ImportTab"):ImportTab(self)
 	self.notesTab = new("NotesTab"):NotesTab(self)
 	self.partyTab = new("PartyTab"):PartyTab(self)
@@ -662,6 +666,7 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 				t_insert(deferredPassiveTrees, node)
 			else
 				if saver:Load(node, self.dbFileName) then
+					self.deferSpecRebuild = nil
 					self:CloseBuild()
 					return
 				end
@@ -671,6 +676,7 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 	for _, node in ipairs(deferredPassiveTrees) do
 		-- Check if there is a saver that can load this section
 		if self.treeTab:Load(node, self.dbFileName) then
+			self.deferSpecRebuild = nil
 			self:CloseBuild()
 			return
 		end
@@ -679,6 +685,10 @@ function buildMode:Init(dbFileName, buildName, buildXML, convertBuild, importLin
 		if saver.PostLoad then
 			saver:PostLoad()
 		end
+	end
+	self.deferSpecRebuild = nil
+	if self.spec then
+		self.spec:EnsureBuilt()
 	end
 
 	if next(self.configTab.input) == nil then
@@ -1155,6 +1165,11 @@ function buildMode:UpdateSecondaryAscendancyDropdown(forceListUpdate)
 end
 
 function buildMode:OnFrame(inputEvents)
+	-- Init clears this on every path it can see, but it is a mode-object field and
+	-- the mode object outlives the load: a section that raises would leave it set,
+	-- and every depends/paths rebuild after that would silently do nothing. No load
+	-- is in progress once a frame is being drawn, so this cannot leak past one.
+	self.deferSpecRebuild = nil
 	-- Stop at drawing the background if the loaded build needs to be converted
 	if not self.targetVersion then
 		main:DrawBackground(main.viewPort)
