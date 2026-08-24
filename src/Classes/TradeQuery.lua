@@ -6,7 +6,7 @@
 
 
 local dkjson = require "dkjson"
-local itemSlotHelper = LoadModule("Modules/ItemSlotHelper")
+local itemSlotHelper = require("Modules.ItemSlotHelper")
 
 local get_time = os.time
 local t_insert = table.insert
@@ -20,7 +20,10 @@ local s_format = string.format
 
 local baseSlots = { "Weapon 1", "Weapon 2", "Weapon 1 Swap", "Weapon 2 Swap", "Helmet", "Body Armour", "Gloves", "Boots", "Amulet", "Ring 1", "Ring 2", "Ring 3", "Belt", "Flask 1", "Flask 2", "Flask 3", "Flask 4", "Flask 5" }
 
-local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
+---@class TradeQuery
+local TradeQueryClass = newClass("TradeQuery")
+
+function TradeQueryClass:TradeQuery(itemsTab)
 	self.itemsTab = itemsTab
 	self.itemsTab.leagueDropList = { }
 	self.totalPrice = { }
@@ -34,6 +37,7 @@ local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
 	self.lastComparedWeightList = { }
 
 	-- default set of trade item sort selection
+	---@type TradeQuerySlotTable[]
 	self.slotTables = { }
 	self.pbItemSortSelectionIndex = 1
 	-- for each realm and league, a table of values of each currency in div
@@ -57,15 +61,16 @@ local TradeQueryClass = newClass("TradeQuery", function(self, itemsTab)
 	-- last query for each row
 	self.lastQueries = {}
 
-	self.tradeQueryRequests = new("TradeQueryRequests")
+	self.tradeQueryRequests = new("TradeQueryRequests"):TradeQueryRequests()
 	if not main.api then
-		main.api = new("PoEAPI", main.lastToken, main.lastRefreshToken, main.tokenExpiry)
+		main.api = new("PoEAPI"):PoEAPI(main.lastToken, main.lastRefreshToken, main.tokenExpiry)
 	end
 
 	self.hostName = "https://www.pathofexile.com/"
 	-- www. optional
 	self.hostNamePattern = "h?t?t?p?s?:?/?/?w?w?w?%.?pathofexile%.com/"
-end)
+	return self
+end
 
 
 
@@ -429,11 +434,11 @@ end
 --- @param onSaved fun(name: string)? called after the preset has been written
 function TradeQueryClass:SaveWeightPresetPopup(weights, onSaved)
 	local controls = { }
-	controls.label = new("LabelControl", nil, {0, 20, 0, 16}, "^7Preset name:")
-	controls.edit = new("EditControl", nil, {0, 40, 250, 20}, nil, nil, nil, 40, function(buf)
+	controls.label = new("LabelControl"):LabelControl(nil, {0, 20, 0, 16}, "^7Preset name:")
+	controls.edit = new("EditControl"):EditControl(nil, {0, 40, 250, 20}, nil, nil, nil, 40, function(buf)
 		controls.save.enabled = buf:match("%S") ~= nil
 	end)
-	controls.save = new("ButtonControl", nil, {-45, 70, 80, 20}, "Save", function()
+	controls.save = new("ButtonControl"):ButtonControl(nil, {-45, 70, 80, 20}, "Save", function()
 		local name = controls.edit.buf:match("^%s*(.-)%s*$")
 		if name == "" then
 			return
@@ -458,7 +463,7 @@ function TradeQueryClass:SaveWeightPresetPopup(weights, onSaved)
 		commit()
 	end)
 	controls.save.enabled = false
-	controls.cancel = new("ButtonControl", nil, {45, 70, 80, 20}, "Cancel", function()
+	controls.cancel = new("ButtonControl"):ButtonControl(nil, {45, 70, 80, 20}, "Cancel", function()
 		main:ClosePopup()
 	end)
 	main:OpenPopup(280, 100, "Save Stat Weight Preset", controls, "save", "edit", "cancel")
@@ -466,7 +471,7 @@ end
 
 -- Opens the item pricing popup
 function TradeQueryClass:PriceItem()
-	self.tradeQueryGenerator = new("TradeQueryGenerator", self)
+	self.tradeQueryGenerator = new("TradeQueryGenerator"):TradeQueryGenerator(self)
 	main.onFrameFuncs["TradeQueryGenerator"] = function()
 		self.tradeQueryGenerator:OnFrame()
 	end
@@ -483,7 +488,7 @@ function TradeQueryClass:PriceItem()
 		local itemSet = self.itemsTab.itemSets[itemSetId]
 		t_insert(newItemList, itemSet.title or "Default")
 	end
-	self.controls.setSelect = new("DropDownControl", {"TOPLEFT", nil, "TOPLEFT"}, {pane_margins_horizontal, pane_margins_vertical, 188, row_height}, newItemList, function(index, value)
+	self.controls.setSelect = new("DropDownControl"):DropDownControl({"TOPLEFT", nil, "TOPLEFT"}, {pane_margins_horizontal, pane_margins_vertical, 188, row_height}, newItemList, function(index, value)
 		self.itemsTab:SetActiveItemSet(self.itemsTab.itemSetOrderList[index])
 		self.itemsTab:AddUndoState()
 	end)
@@ -502,7 +507,7 @@ function TradeQueryClass:PriceItem()
 				self.clickTime = nil
 				return "Not authenticated"
 			else
-				return "Logging in... (" .. left .. ") - URL copied to clipboard"
+				return "Logging in... (" .. left .. ")"
 			end
 		else
 			return colorCodes.WARNING.."Not authenticated"
@@ -518,7 +523,7 @@ function TradeQueryClass:PriceItem()
 			end
 		end)
 	end
-	self.controls.tradeAuthButton = new("ButtonControl", {"TOPLEFT", self.controls.setSelect, "TOPLEFT"}, {0, row_height + row_vertical_padding, 188, row_height}, self.loginStatus, function()
+	self.controls.tradeAuthButton = new("ButtonControl"):ButtonControl({"TOPLEFT", self.controls.setSelect, "TOPLEFT"}, {0, row_height + row_vertical_padding, 188, row_height}, self.loginStatus, function()
 		-- LOGIN
 		if not main.api.authToken then
 			main.api:FetchAuthToken(function()
@@ -573,7 +578,7 @@ on trade site to work on other leagues and realms)]]
 		"Any (includes offline)"
 	}
 
-	self.controls.tradeTypeSelection = new("DropDownControl", { "TOPLEFT", self.controls.tradeAuthButton, "BOTTOMLEFT" },
+	self.controls.tradeTypeSelection = new("DropDownControl"):DropDownControl({ "TOPLEFT", self.controls.tradeAuthButton, "BOTTOMLEFT" },
 		{ 0, row_vertical_padding, 188, row_height }, self.tradeTypes, function(index, value)
 			self.tradeTypeIndex = index
 		end)
@@ -582,7 +587,7 @@ on trade site to work on other leagues and realms)]]
 
 	-- Fetches Box
 	self.maxFetchPerSearchDefault = 2
-	self.controls.fetchCountEdit = new("EditControl", {"TOPRIGHT", nil, "TOPRIGHT"}, {-12, 19, 150, row_height}, "", "Fetch Pages", "%D", 3, function(buf)
+	self.controls.fetchCountEdit = new("EditControl"):EditControl({"TOPRIGHT", nil, "TOPRIGHT"}, {-12, 19, 150, row_height}, "", "Fetch Pages", "%D", 3, function(buf)
 		self.maxFetchPages = m_min(m_max(tonumber(buf) or self.maxFetchPerSearchDefault, 1), 10)
 		self.tradeQueryRequests.maxFetchPerSearch = 10 * self.maxFetchPages
 		self.controls.fetchCountEdit.focusValue = self.maxFetchPages
@@ -606,7 +611,7 @@ on trade site to work on other leagues and realms)]]
 		self.statSortSelectionList = { }
 		initStatSortSelectionList(self.statSortSelectionList)
 	end
-	self.controls.StatWeightMultipliersButton = new("ButtonControl", {"TOPRIGHT", self.controls.fetchCountEdit, "BOTTOMRIGHT"}, {0, row_vertical_padding, 150, row_height}, "^7Adjust search weights", function()
+	self.controls.StatWeightMultipliersButton = new("ButtonControl"):ButtonControl({"TOPRIGHT", self.controls.fetchCountEdit, "BOTTOMRIGHT"}, {0, row_vertical_padding, 150, row_height}, "^7Adjust search weights", function()
 		self.itemsTab.modFlag = true
 		self:SetStatWeights()
 	end)
@@ -621,8 +626,8 @@ on trade site to work on other leagues and realms)]]
 
 	-- Stat weight preset selection, for switching between saved sets of weights
 	-- without having to open the weight popup
-	self.controls.weightPresetLabel = new("LabelControl", {"LEFT", self.controls.tradeTypeSelection, "RIGHT"}, {18, 0, 0, row_height - 4}, "^7Weights:")
-	self.controls.weightPreset = new("DropDownControl", {"LEFT", self.controls.weightPresetLabel, "RIGHT"}, {6, 0, 170, row_height}, { }, function(index, value)
+	self.controls.weightPresetLabel = new("LabelControl"):LabelControl({"LEFT", self.controls.tradeTypeSelection, "RIGHT"}, {18, 0, 0, row_height - 4}, "^7Weights:")
+	self.controls.weightPreset = new("DropDownControl"):DropDownControl({"LEFT", self.controls.weightPresetLabel, "RIGHT"}, {6, 0, 170, row_height}, { }, function(index, value)
 		if value.preset then
 			self:ApplyWeightPreset(value.preset)
 		end
@@ -654,7 +659,7 @@ on trade site to work on other leagues and realms)]]
 		self.sortModes.Price,
 		self.sortModes.Weight,
 	}
-	self.controls.itemSortSelection = new("DropDownControl", {"TOPRIGHT", self.controls.StatWeightMultipliersButton, "TOPLEFT"}, {-8, 0, 170, row_height}, self.itemSortSelectionList, function(index, value)
+	self.controls.itemSortSelection = new("DropDownControl"):DropDownControl({"TOPRIGHT", self.controls.StatWeightMultipliersButton, "TOPLEFT"}, {-8, 0, 170, row_height}, self.itemSortSelectionList, function(index, value)
 		self.pbItemSortSelectionIndex = index
 		for row_idx, _ in pairs(self.resultTbl) do
 			self:UpdateControlsWithItems(row_idx)
@@ -669,11 +674,11 @@ Lowest Price - Sorts from lowest to highest price of retrieved items
 Highest Weight - Displays the order retrieved from trade]]
 	-- avoid calling selFunc to avoid updating controls before they are initialised
 	self.controls.itemSortSelection:SetSel(self.pbItemSortSelectionIndex, true)
-	self.controls.itemSortSelectionLabel = new("LabelControl", {"TOPRIGHT", self.controls.itemSortSelection, "TOPLEFT"}, {-4, 0, 56, 16}, "^7Sort By:")
+	self.controls.itemSortSelectionLabel = new("LabelControl"):LabelControl({"TOPRIGHT", self.controls.itemSortSelection, "TOPLEFT"}, {-4, 0, 56, 16}, "^7Sort By:")
 
 	-- Realm selection
-	self.controls.realmLabel = new("LabelControl", {"LEFT", self.controls.setSelect, "RIGHT"}, {18, 0, 20, row_height - 4}, "^7Realm:")
-	self.controls.realm = new("DropDownControl", {"LEFT", self.controls.realmLabel, "RIGHT"}, {6, 0, 150, row_height}, self.realmDropList, function(index, value)
+	self.controls.realmLabel = new("LabelControl"):LabelControl({"LEFT", self.controls.setSelect, "RIGHT"}, {18, 0, 20, row_height - 4}, "^7Realm:")
+	self.controls.realm = new("DropDownControl"):DropDownControl({"LEFT", self.controls.realmLabel, "RIGHT"}, {6, 0, 150, row_height}, self.realmDropList, function(index, value)
 		self.pbRealmIndex = index
 		if self.pbRealm ~= self.realmIds[value] then
 			self.pbRealm = self.realmIds[value]
@@ -715,8 +720,8 @@ Highest Weight - Displays the order retrieved from trade]]
 	end
 
 	-- League selection
-	self.controls.leagueLabel = new("LabelControl", {"TOPRIGHT", self.controls.realmLabel, "TOPRIGHT"}, {0, row_height + row_vertical_padding, 20, row_height - 4}, "^7League:")
-	self.controls.league = new("DropDownControl", {"LEFT", self.controls.leagueLabel, "RIGHT"}, {6, 0, 150, row_height}, self.itemsTab.leagueDropList, function(index, value)
+	self.controls.leagueLabel = new("LabelControl"):LabelControl({"TOPRIGHT", self.controls.realmLabel, "TOPRIGHT"}, {0, row_height + row_vertical_padding, 20, row_height - 4}, "^7League:")
+	self.controls.league = new("DropDownControl"):DropDownControl({"LEFT", self.controls.leagueLabel, "RIGHT"}, {6, 0, 150, row_height}, self.itemsTab.leagueDropList, function(index, value)
 		self.pbLeagueIndex = index
 		self.pbLeague = value
 	end)
@@ -745,6 +750,16 @@ Highest Weight - Displays the order retrieved from trade]]
 	end
 
 	-- Individual slot rows
+	---@class TradeQuerySlotTable
+	---@field slotName string Display name of the row, also the slot name for regular slots
+	---@field fullName string? Actual slot name for abyssal sockets, where slotName is the shortened label
+	---@field nodeId number? Passive tree node id for jewel socket rows
+	---@field unique boolean? Row targets a specific unique instead of a slot
+	---@field alreadyCorrupted boolean? The targeted unique only drops corrupted
+	---@field selectedJewelNodeId number? Jewel socket the unique row searches for
+	---@field selectedSlotName string? A slot name which was selected in the TradeQueryGenerator popup
+
+	---@type TradeQuerySlotTable[]
 	local slotTables = {}
 	for _, slotName in ipairs(baseSlots) do
 		if self.itemsTab.slots[slotName].shown() then
@@ -772,16 +787,18 @@ Highest Weight - Displays the order retrieved from trade]]
 		t_insert(slotTables, { slotName = self.itemsTab.sockets[nodeId].label, nodeId = nodeId })
 	end
 
-	self.controls.sectionAnchor = new("LabelControl", {"LEFT", self.controls.tradeTypeSelection, "LEFT"}, {0, row_vertical_padding, 0, 0}, "")
+	self.controls.sectionAnchor = new("LabelControl"):LabelControl({"LEFT", self.controls.tradeTypeSelection, "LEFT"}, {0, row_vertical_padding, 0, 0}, "")
 	top_pane_alignment_ref = {"TOPLEFT", self.controls.sectionAnchor, "TOPLEFT"}
 	local scrollBarShown = #slotTables > 21 -- clipping starts beyond this
 	-- dynamically hide rows that are above or below the scrollBar
 	local hideRowFunc = function(self, index)
 		if scrollBarShown then
-			-- 22 items fit in the scrollBar "box" so as the offset moves, we need to dynamically show what is within the boundaries
-			if (index < 23 and (self.controls.scrollBar.offset < ((row_height + row_vertical_padding)*(index-1) + row_vertical_padding))) or
+			local rowWithPadding = row_height + row_vertical_padding
+			-- this many items fit in the scrollBar "box" so as the offset moves, we need to dynamically show what is within the boundaries
+			local maxItemsInView = math.floor(self.controls.scrollBar.height / rowWithPadding) - 2
+			if (index <= maxItemsInView and (self.controls.scrollBar.offset < (rowWithPadding * (index - 1) + row_vertical_padding))) or
 				-- the second and in this applies if we have more than 44 slots because we need to hide the next "page" of rows as they go above the line, e.g. #23 could be above or below the "box"
-				(index >= 23 and (self.controls.scrollBar.offset > (row_height + row_vertical_padding)*(index-22) and self.controls.scrollBar.offset < (row_height + row_vertical_padding)*(index-1))) then
+				(index >= maxItemsInView + 1 and (self.controls.scrollBar.offset > rowWithPadding * (index - maxItemsInView) and self.controls.scrollBar.offset < rowWithPadding * (index - 1))) then
 				return true
 			end
 		else
@@ -797,7 +814,7 @@ Highest Weight - Displays the order retrieved from trade]]
 		end
 	end
 
-	self.controls.otherTradesLabel = new("LabelControl", top_pane_alignment_ref, {0, (#slotTables+1)*(row_height + row_vertical_padding), 100, 16}, "^8Other trades:")
+	self.controls.otherTradesLabel = new("LabelControl"):LabelControl(top_pane_alignment_ref, {0, (#slotTables+1)*(row_height + row_vertical_padding), 100, 16}, "^8Other trades:")
 	self.controls.otherTradesLabel.shown = function()
 		return hideRowFunc(self, #slotTables+1)
 	end
@@ -816,7 +833,15 @@ Highest Weight - Displays the order retrieved from trade]]
 	self.controls["name"..row_count].shown = function()
 		return hideRowFunc(self, row_count)
 	end
+	row_count = row_count + 1
 
+	-- Pearl of Tsoatha
+	self.slotTables[row_count] = { slotName = "Pearl of Tsoatha", unique = true }
+	self:PriceItemRowDisplay(row_count, top_pane_alignment_ref, row_vertical_padding, row_height)
+	self.controls["name" .. row_count].y = self.controls["name" .. row_count].y + (row_height + row_vertical_padding)
+	self.controls["name" .. row_count].shown = function()
+		return hideRowFunc(self, row_count)
+	end
 	-- fix case where the row count is reduced from the last time the popup was
 	-- opened, which would leave extra row controls in the menu
 	for k, v in pairs(self.controls) do
@@ -833,11 +858,11 @@ Highest Weight - Displays the order retrieved from trade]]
 	self.pane_height = (row_height + row_vertical_padding) * effective_row_count + 3 * pane_margins_vertical + row_height / 2
 	local pane_width = 885 + (scrollBarShown and 25 or 0)
 
-	self.controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT", self.controls["StatWeightMultipliersButton"],"TOPRIGHT"}, {0, 25, 18, 0}, 50, "VERTICAL", false)
+	self.controls.scrollBar = new("ScrollBarControl"):ScrollBarControl({"TOPRIGHT", self.controls["StatWeightMultipliersButton"],"TOPRIGHT"}, {0, 25, 18, 0}, 50, "VERTICAL", false)
 	self.controls.scrollBar.shown = function() return scrollBarShown end
 
-	self.controls.fullPrice = new("LabelControl", {"BOTTOM", nil, "BOTTOM"}, {0, -row_height - pane_margins_vertical - row_vertical_padding, pane_width - 2 * pane_margins_horizontal, row_height}, "")
-	self.controls.close = new("ButtonControl", {"BOTTOM", nil, "BOTTOM"}, {0, -pane_margins_vertical, 90, row_height}, "Done", function()
+	self.controls.fullPrice = new("LabelControl"):LabelControl({"BOTTOM", nil, "BOTTOM"}, {0, -row_height - pane_margins_vertical - row_vertical_padding, pane_width - 2 * pane_margins_horizontal, row_height}, "")
+	self.controls.close = new("ButtonControl"):ButtonControl({"BOTTOM", nil, "BOTTOM"}, {0, -pane_margins_vertical, 90, row_height}, "Done", function()
 		main:ClosePopup()
 	end)
 
@@ -845,7 +870,7 @@ Highest Weight - Displays the order retrieved from trade]]
 	-- "what is the best set": the best helmet on its own often breaks the
 	-- resistance cap or the Strength a weapon needs, and paying that back costs
 	-- more than the helmet gained. This solves across the slots together.
-	self.controls.solveSet = new("ButtonControl", {"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {pane_margins_horizontal, -pane_margins_vertical, 110, row_height}, "Solve Set", function()
+	self.controls.solveSet = new("ButtonControl"):ButtonControl({"BOTTOMLEFT", nil, "BOTTOMLEFT"}, {pane_margins_horizontal, -pane_margins_vertical, 110, row_height}, "Solve Set", function()
 		self:OptimiseSetPopup()
 	end)
 	-- Deliberately not gated on having fetched anything: the slots are picked
@@ -865,7 +890,7 @@ helmet on its own often breaks the resistance cap or the Strength a weapon needs
 
 Anything already fetched above is reused; a slot may also be left alone if that
 turns out better.]]
-	self.controls.pbNotice = new("LabelControl",  {"BOTTOMRIGHT", nil, "BOTTOMRIGHT"}, {-row_height - pane_margins_vertical - row_vertical_padding, -pane_margins_vertical, 300, row_height}, "")
+	self.controls.pbNotice = new("LabelControl"):LabelControl({"BOTTOMRIGHT", nil, "BOTTOMRIGHT"}, {-row_height - pane_margins_vertical - row_vertical_padding, -pane_margins_vertical, 300, row_height}, "")
 
 	-- used in PopupDialog:Draw()
 	local function scrollBarFunc()
@@ -915,7 +940,7 @@ function TradeQueryClass:BuildOptimiserPools()
 			local pool = { }
 			for _, entry in ipairs(results) do
 				local price = self:ConvertCurrencyToChaos(entry.currency, entry.amount)
-				local ok, item = pcall(function() return new("Item", entry.item_string) end)
+				local ok, item = pcall(function() return new("Item"):Item(entry.item_string) end)
 				if price and ok and item and item.base then
 					item:NormaliseQuality()
 					item:BuildModList()
@@ -1251,7 +1276,7 @@ function TradeQueryClass:OptimiseSetPopup()
 
 	-- Persisted in Settings.xml so the dialog opens the way it was left
 	local opt = main.tradeOptimiser
-	local optimiser = new("TradeSetOptimiser", self.itemsTab)
+	local optimiser = new("TradeSetOptimiser"):TradeSetOptimiser(self.itemsTab)
 	local row = 0
 	local function nextY()
 		row = row + 1
@@ -1265,7 +1290,7 @@ function TradeQueryClass:OptimiseSetPopup()
 	local hasResults = { }
 	for _, name in ipairs(slotNames) do hasResults[name] = true end
 
-	controls.slotsLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 },
+	controls.slotsLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 },
 		"^7Slots to consider:")
 	local perColumn = m_ceil(#slotEntries / 2)
 	local slotRowTop = 26 * row - 6
@@ -1273,7 +1298,7 @@ function TradeQueryClass:OptimiseSetPopup()
 		local column = index > perColumn and 1 or 0
 		local rowInColumn = index > perColumn and (index - perColumn - 1) or (index - 1)
 		local name = "slot" .. index
-		controls[name] = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" },
+		controls[name] = new("CheckBoxControl"):CheckBoxControl({ "TOPLEFT", nil, "TOPLEFT" },
 			{ 190 + column * 300, slotRowTop + 22 + rowInColumn * 22, 18, 18 },
 			"^7" .. entry.slotName .. ":", function() end, nil, false)
 		-- Remembered ticks win; otherwise anything already fetched starts on
@@ -1288,7 +1313,7 @@ function TradeQueryClass:OptimiseSetPopup()
 		-- searched for. Make the choice visible rather than deciding silently.
 		local countAnchor = controls[name]
 		if entry.slotName == "Weapon 2" then
-			controls.offhandMode = new("DropDownControl", { "LEFT", controls[name], "RIGHT" },
+			controls.offhandMode = new("DropDownControl"):DropDownControl({ "LEFT", controls[name], "RIGHT" },
 				{ 6, 0, 110, 18 }, { "Weapons + Shields", "Weapons only", "Shields only" }, function() end)
 			controls.offhandMode:SetSel(opt.offhandMode or 1)
 			controls.offhandMode.tooltipText = [[What to search for in the off-hand.
@@ -1298,7 +1323,7 @@ Path of Building works the category out from whatever is equipped, so an empty o
 Ignored if your main hand holds a two-handed weapon, since nothing can go here.]]
 			countAnchor = controls.offhandMode
 		end
-		controls[name .. "n"] = new("LabelControl", { "LEFT", countAnchor, "RIGHT" }, { 6, 0, 0, 14 },
+		controls[name .. "n"] = new("LabelControl"):LabelControl({ "LEFT", countAnchor, "RIGHT" }, { 6, 0, 0, 14 },
 			hasResults[entry.slotName] and ("^8" .. #(self.resultTbl[entry.rowIdx] or { }) .. " fetched") or "")
 		entry.countLabel = controls[name .. "n"]
 	end
@@ -1323,9 +1348,9 @@ Ignored if your main hand holds a two-handed weapon, since nothing can go here.]
 		end
 		return "^8" .. table.concat(parts, ", ")
 	end
-	controls.objectiveLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 },
+	controls.objectiveLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 },
 		function() return "^7Maximise: " .. weightSummary() end)
-	controls.adjustWeights = new("ButtonControl", { "TOPLEFT", controls.objectiveLabel, "TOPLEFT" },
+	controls.adjustWeights = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls.objectiveLabel, "TOPLEFT" },
 		{ 560, -3, 150, 20 }, "^7Adjust search weights", function()
 			self:SetStatWeights()
 		end)
@@ -1333,26 +1358,26 @@ Ignored if your main hand holds a two-handed weapon, since nothing can go here.]
 
 These weights drive both halves of the solve: the searches ask the trade site for items that score well on them, and the solver ranks whole sets by them. A search only looks for mods that move the stats it is given -- weight Effective Hit Pool and spell suppression starts mattering, weight Spell Suppression Chance directly and it is searched for by name.]]
 
-	controls.budgetLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Budget (Chaos):")
-	controls.budget = new("EditControl", { "LEFT", controls.budgetLabel, "RIGHT" }, { 8, 0, 100, 20 },
+	controls.budgetLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Budget (Chaos):")
+	controls.budget = new("EditControl"):EditControl({ "LEFT", controls.budgetLabel, "RIGHT" }, { 8, 0, 100, 20 },
 		tostring(opt.budget), nil, "%D")
 
 	-- Two fields to a row, each anchored off the row counter rather than off its
 	-- neighbour: chaining them sideways ran the last field off the dialog and put
 	-- the next row on top of the one after it
-	controls.resistLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Resistances at least:")
-	controls.resist = new("EditControl", { "LEFT", controls.resistLabel, "RIGHT" }, { 8, 0, 60, 20 },
+	controls.resistLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 }, "^7Resistances at least:")
+	controls.resist = new("EditControl"):EditControl({ "LEFT", controls.resistLabel, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.resist), nil, "%D")
-	controls.overcapLabel = new("LabelControl", { "LEFT", controls.resist, "RIGHT" }, { 24, 0, 0, 16 }, "^7Allowed overcap:")
-	controls.overcap = new("EditControl", { "LEFT", controls.overcapLabel, "RIGHT" }, { 8, 0, 60, 20 },
+	controls.overcapLabel = new("LabelControl"):LabelControl({ "LEFT", controls.resist, "RIGHT" }, { 24, 0, 0, 16 }, "^7Allowed overcap:")
+	controls.overcap = new("EditControl"):EditControl({ "LEFT", controls.overcapLabel, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.maxOvercap), nil, "%D")
 
-	controls.chaosLabel = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 },
+	controls.chaosLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 100, 16 },
 		"^7Chaos resistance at least:")
-	controls.chaos = new("EditControl", { "LEFT", controls.chaosLabel, "RIGHT" }, { 8, 0, 60, 20 },
+	controls.chaos = new("EditControl"):EditControl({ "LEFT", controls.chaosLabel, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.chaosFloor or 0), nil, "%D")
-	controls.attrLabel = new("LabelControl", { "LEFT", controls.chaos, "RIGHT" }, { 24, 0, 0, 16 }, "^7Attribute headroom:")
-	controls.attr = new("EditControl", { "LEFT", controls.attrLabel, "RIGHT" }, { 8, 0, 60, 20 },
+	controls.attrLabel = new("LabelControl"):LabelControl({ "LEFT", controls.chaos, "RIGHT" }, { 24, 0, 0, 16 }, "^7Attribute headroom:")
+	controls.attr = new("EditControl"):EditControl({ "LEFT", controls.attrLabel, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.attrMargin), nil, "%D")
 	controls.chaos.tooltipText = [[Minimum chaos resistance. 0 means no requirement.
 
@@ -1365,13 +1390,13 @@ Resistance past the cap does nothing, so without a ceiling the solver will happi
 Set 0 to insist on landing exactly on the cap, which is usually impossible since resistance comes in whole rolls. If nothing fits the allowance, the closest set is used and the result says by how much it overshot.]]
 	controls.attr.tooltipText = "Requirements are read from each set as it is measured, because gear with reduced Attribute Requirements lowers the requirement rather than raising the attribute. This is how much room to leave above whatever the requirement turns out to be."
 
-	controls.swapCheck = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY(), 20, 20 },
+	controls.swapCheck = new("CheckBoxControl"):CheckBoxControl({ "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY(), 20, 20 },
 		"^7Allow resistance swap crafts:", function(state) end, nil, false)
 	controls.swapCheck.state = opt.swaps
-	controls.swapCost = new("EditControl", { "LEFT", controls.swapCheck, "RIGHT" }, { 8, 0, 60, 20 },
+	controls.swapCost = new("EditControl"):EditControl({ "LEFT", controls.swapCheck, "RIGHT" }, { 8, 0, 60, 20 },
 		tostring(opt.swapCost), nil, "%D")
 	controls.swapCost.shown = function() return controls.swapCheck.state end
-	controls.swapCostLabel = new("LabelControl", { "LEFT", controls.swapCost, "RIGHT" }, { 8, 0, 0, 16 }, "^8Chaos each")
+	controls.swapCostLabel = new("LabelControl"):LabelControl({ "LEFT", controls.swapCost, "RIGHT" }, { 8, 0, 0, 16 }, "^8Chaos each")
 	controls.swapCostLabel.shown = function() return controls.swapCheck.state end
 	controls.swapCheck.tooltipText = [[The Harvest bench can change one elemental resistance to another on an uncorrupted, unmirrored item.
 
@@ -1379,8 +1404,8 @@ With this on, which element the resistance lands on stops mattering — only the
 
 Counted in resistance points rather than whole modifiers, so treat a nonzero count as "needs bench work" and check the per-element numbers before buying.]]
 
-	controls.demands = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 }, "")
-	controls.status = new("LabelControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 }, "")
+	controls.demands = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 }, "")
+	controls.status = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY(), 0, 16 }, "")
 	local resultRows = { }
 
 	local function clearResults()
@@ -1411,14 +1436,14 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 		for _, cand in ipairs(result.combo) do
 			if not cand.keep then
 				local name = "res" .. #resultRows
-				controls[name] = new("LabelControl", { "TOPLEFT", anchor, "BOTTOMLEFT" },
+				controls[name] = new("LabelControl"):LabelControl({ "TOPLEFT", anchor, "BOTTOMLEFT" },
 					{ 0, anchor == controls.solve and 16 or 8, 0, 16 },
 					s_format("^7%-14s ^8%s", cand.slotName, cand.label))
 				anchor = controls[name]
 				t_insert(resultRows, name)
 				-- A solved set is no use without a way to actually buy it
 				local openName = name .. "open"
-				controls[openName] = new("ButtonControl", { "TOPLEFT", controls[name], "TOPLEFT" },
+				controls[openName] = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls[name], "TOPLEFT" },
 					{ 470, -3, 90, 18 }, "Trade page", function()
 						local url = self:OptimiserItemURL(cand)
 						Copy(url)
@@ -1427,7 +1452,7 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 				controls[openName].tooltipText = "Opens this listing on the trade site, and copies the link to the clipboard."
 				t_insert(resultRows, openName)
 				local whisperName = name .. "whisper"
-				controls[whisperName] = new("ButtonControl", { "TOPLEFT", controls[openName], "TOPRIGHT" },
+				controls[whisperName] = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls[openName], "TOPRIGHT" },
 					{ 6, 0, 80, 18 }, "Whisper", function()
 						Copy((cand.listing or { }).whisper or "")
 					end)
@@ -1444,7 +1469,7 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 			result.stats.Str or 0, result.stats.ReqStr or 0,
 			result.stats.Dex or 0, result.stats.ReqDex or 0,
 			result.stats.Int or 0, result.stats.ReqInt or 0)
-		controls.resistSummary = new("LabelControl", { "TOPLEFT", anchor, "BOTTOMLEFT" }, { 0, 8, 0, 16 }, resistLine)
+		controls.resistSummary = new("LabelControl"):LabelControl({ "TOPLEFT", anchor, "BOTTOMLEFT" }, { 0, 8, 0, 16 }, resistLine)
 		t_insert(resultRows, "resistSummary")
 	end
 
@@ -1524,12 +1549,12 @@ Counted in resistance points rather than whole modifiers, so treat a nonzero cou
 	end
 	searchState.startSolve = startSolve
 
-	controls.refetch = new("CheckBoxControl", { "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY() + 8, 18, 18 },
+	controls.refetch = new("CheckBoxControl"):CheckBoxControl({ "TOPLEFT", nil, "TOPLEFT" }, { 190, nextY() + 8, 18, 18 },
 		"^7Re-search slots with items:", function() end, nil, false)
 	controls.refetch.state = opt.refetch
 	controls.refetch.tooltipText = "Listings sell quickly. Leave this on if the results in the Trader are more than a few minutes old."
 
-	controls.solve = new("ButtonControl", { "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY() + 12, 150, 20 },
+	controls.solve = new("ButtonControl"):ButtonControl({ "TOPLEFT", nil, "TOPLEFT" }, { 16, nextY() + 12, 150, 20 },
 		"Solve Set", function()
 			readSettings()
 			clearResults()
@@ -1602,12 +1627,12 @@ Any ticked slot without items is searched first — the same weighted search "Fi
 
 Searches run one slot at a time, because the query generator handles one at a time and the trade API is rate limited. Results also land in the Trader rows behind this dialog.]]
 
-	controls.equip = new("ButtonControl", { "LEFT", controls.solve, "RIGHT" }, { 8, 0, 110, 20 }, "Equip Set", function()
+	controls.equip = new("ButtonControl"):ButtonControl({ "LEFT", controls.solve, "RIGHT" }, { 8, 0, 110, 20 }, "Equip Set", function()
 		local result = self.optimiserResult
 		if not (result and result.ok) then return end
 		for _, cand in ipairs(result.combo) do
 			if not cand.keep then
-				local item = new("Item", cand.item:BuildRaw())
+				local item = new("Item"):Item(cand.item:BuildRaw())
 				item:NormaliseQuality()
 				item:BuildModList()
 				self.itemsTab:AddItem(item, true)
@@ -1624,7 +1649,7 @@ Searches run one slot at a time, because the query generator handles one at a ti
 	end
 	controls.equip.tooltipText = "Puts the solved set into the build. Undoable with Ctrl+Z."
 
-	controls.close = new("ButtonControl", { "LEFT", controls.equip, "RIGHT" }, { 8, 0, 90, 20 }, "Close", function()
+	controls.close = new("ButtonControl"):ButtonControl({ "LEFT", controls.equip, "RIGHT" }, { 8, 0, 90, 20 }, "Close", function()
 		searchState.queue = { }
 		main.onFrameFuncs["TradeSetOptimiser"] = nil
 		main:ClosePopup()
@@ -1759,7 +1784,7 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 	-- account for top gap, bottom button size and gap, and a gap before buttons
 	local listHeight = popupHeight - listYOffset - 30 - 10
 
-	controls.ListControl = new("TradeStatWeightMultiplierListControl", { "TOPLEFT", nil, "TOPRIGHT" },
+	controls.ListControl = new("TradeStatWeightMultiplierListControl"):TradeStatWeightMultiplierListControl({ "TOPLEFT", nil, "TOPRIGHT" },
 		{ -410, listYOffset, 400, listHeight }, statList, sliderController)
 
 	for _, stat in ipairs(data.powerStatList) do
@@ -1776,10 +1801,10 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 		end
 	end
 
-	controls.SliderLabel = new("LabelControl", { "TOPLEFT", nil, "TOPRIGHT" }, {-410, sliderYOffset, 0, 16}, "^7"..statList[1].stat.label..":")
+	controls.SliderLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPRIGHT" }, {-410, sliderYOffset, 0, 16}, "^7"..statList[1].stat.label..":")
 	-- assigned further down, once the preset dropdown exists
 	local refreshPresets
-	controls.Slider = new("SliderControl", { "TOPLEFT", controls.SliderLabel, "TOPRIGHT" }, {20, 0, 150, 16}, function(value)
+	controls.Slider = new("SliderControl"):SliderControl({ "TOPLEFT", controls.SliderLabel, "TOPRIGHT" }, {20, 0, 150, 16}, function(value)
 		if value == 0 then
 			controls.SliderValue.label = "^7Disabled"
 			statList[sliderController.index].stat.weightMult = 0
@@ -1793,7 +1818,7 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 			refreshPresets()
 		end
 	end)
-	controls.SliderValue = new("LabelControl", { "TOPLEFT", controls.Slider, "TOPRIGHT" }, {20, 0, 0, 16}, "^7Disabled")
+	controls.SliderValue = new("LabelControl"):LabelControl({ "TOPLEFT", controls.Slider, "TOPRIGHT" }, {20, 0, 0, 16}, "^7Disabled")
 	controls.Slider.tooltip.realDraw = controls.Slider.tooltip.Draw
 	controls.Slider.tooltip.Draw = function(self, x, y, width, height, viewPort)
 		local sliderOffsetX = round(184 * (1 - controls.Slider.val))
@@ -1864,8 +1889,8 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 	end
 
 	-- preset selection and management
-	controls.presetLabel = new("LabelControl", { "TOPLEFT", nil, "TOPRIGHT" }, {-410, presetYOffset + 2, 0, 16}, "^7Preset:")
-	controls.preset = new("DropDownControl", { "TOPLEFT", controls.presetLabel, "TOPRIGHT" }, {6, -2, 172, 20}, { }, function(index, value)
+	controls.presetLabel = new("LabelControl"):LabelControl({ "TOPLEFT", nil, "TOPRIGHT" }, {-410, presetYOffset + 2, 0, 16}, "^7Preset:")
+	controls.preset = new("DropDownControl"):DropDownControl({ "TOPLEFT", controls.presetLabel, "TOPRIGHT" }, {6, -2, 172, 20}, { }, function(index, value)
 		if value.preset then
 			applyWeights(value.preset.weights)
 		end
@@ -1877,7 +1902,7 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 		controls.preset:SetList(list)
 		controls.preset.selIndex = selIndex
 	end
-	controls.presetSave = new("ButtonControl", { "TOPLEFT", controls.preset, "TOPRIGHT" }, {6, 0, 86, 20}, "Save As...", function()
+	controls.presetSave = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls.preset, "TOPRIGHT" }, {6, 0, 86, 20}, "Save As...", function()
 		local weights = getEditedWeights()
 		if #weights == 0 then
 			main:OpenMessagePopup("Stat Weight Presets", "Set at least one stat weight above 0\nbefore saving it as a preset.")
@@ -1888,7 +1913,7 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 		end)
 	end)
 	controls.presetSave.tooltipText = "Saves the weights set below as a named preset, available to all builds."
-	controls.presetDelete = new("ButtonControl", { "TOPLEFT", controls.presetSave, "TOPRIGHT" }, {6, 0, 70, 20}, "Delete", function()
+	controls.presetDelete = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls.presetSave, "TOPRIGHT" }, {6, 0, 70, 20}, "Delete", function()
 		local selValue = controls.preset:GetSelValue()
 		if not selValue or not selValue.preset then
 			return
@@ -1907,7 +1932,7 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 
 	applyWeights(self.statSortSelectionList)
 
-	controls.finalise = new("ButtonControl", { "BOTTOM", nil, "BOTTOM" }, {-90, -10, 80, 20}, "Save", function()
+	controls.finalise = new("ButtonControl"):ButtonControl({ "BOTTOM", nil, "BOTTOM" }, {-90, -10, 80, 20}, "Save", function()
 		main:ClosePopup()
 
 		-- used in ItemsTab to save to xml under TradeSearchWeights node
@@ -1921,14 +1946,14 @@ function TradeQueryClass:SetStatWeights(previousSelectionList)
 			self:UpdateControlsWithItems(row_idx)
 		end
     end)
-	controls.cancel = new("ButtonControl", { "BOTTOM", nil, "BOTTOM" }, { 0, -10, 80, 20 }, "Cancel", function()
+	controls.cancel = new("ButtonControl"):ButtonControl({ "BOTTOM", nil, "BOTTOM" }, { 0, -10, 80, 20 }, "Cancel", function()
 		if previousSelectionList and #previousSelectionList > 0 then
 			self.statSortSelectionList = copyTable(previousSelectionList, true)
 		end
 		self:RefreshWeightPresetControl()
 		main:ClosePopup()
 	end)
-	controls.reset = new("ButtonControl", { "BOTTOM", nil, "BOTTOM" }, { 90, -10, 80, 20 }, "Reset", function()
+	controls.reset = new("ButtonControl"):ButtonControl({ "BOTTOM", nil, "BOTTOM" }, { 90, -10, 80, 20 }, "Reset", function()
 		local previousSelection = { }
 		if isSameAsDefaultList(self.statSortSelectionList) then
 			previousSelection = copyTable(previousSelectionList, true)
@@ -1988,8 +2013,7 @@ function TradeQueryClass:GetResultEvaluation(row_idx, result_index, calcFunc, ba
 	end
 	local slotTbl = self.slotTables[row_idx]
 	local jewelNodeId = slotTbl.nodeId or slotTbl.selectedJewelNodeId
-	local slotName = jewelNodeId and "Jewel " .. tostring(jewelNodeId) or slotTbl.slotName
-	if slotName == "Megalomaniac" then
+	if slotTbl.slotName == "Megalomaniac" then
 		local addedNodes = {}
 		for nodeName in (result.item_string.."\r\n"):gmatch("1 Added Passive Skill is (.-)\r?\n") do
 			t_insert(addedNodes, self.itemsTab.build.spec.tree.clusterNodeMap[nodeName])
@@ -2011,7 +2035,17 @@ function TradeQueryClass:GetResultEvaluation(row_idx, result_index, calcFunc, ba
 		}
 		table.sort(result.evaluation, function(a, b) return a.weight > b.weight end)
 	else
-		local item = new("Item", result.item_string)
+		if slotTbl.slotName == "Pearl of Tsoatha" and not slotTbl.selectedSlotName then
+			for index = 1, 3 do
+				local ringSlot = self.itemsTab.slots["Ring " .. index]
+				if ringSlot and ringSlot.shown() then
+					slotTbl.selectedSlotName = ringSlot.slotName
+					break
+				end
+			end
+		end
+		local slotName = jewelNodeId and "Jewel " .. tostring(jewelNodeId) or slotTbl.selectedSlotName or slotTbl.slotName
+		local item = new("Item"):Item(result.item_string)
 
 		local output = self:ReduceOutput(calcFunc({ repSlotName = slotName, repItem = item }))
 		local weight = self.tradeQueryGenerator.WeightedRatioOutputs(baseOutput, output, self.statSortSelectionList)
@@ -2031,7 +2065,7 @@ function TradeQueryClass:UpdateDropdownList(row_idx)
 		local pb_index = self.sortedResultTbl[row_idx][result_index].index
 		local result = self.resultTbl[row_idx][pb_index]
 		local price = string.format(" %s(%d %s)", colorCodes["CURRENCY"], result.amount, result.currency)
-		local item = new("Item", result.item_string)
+		local item = new("Item"):Item(result.item_string)
 		table.insert(dropdownLabels, colorCodes[item.rarity] .. item.name .. price)
 	end
 	self.controls["resultDropdown".. row_idx].selIndex = 1
@@ -2169,7 +2203,7 @@ end
 function TradeQueryClass:FilterToSafeItems(itemEntries, slotName)
 	local itemsSafe = {}
 	for _, entry in ipairs(itemEntries) do
-		local item = new("Item", entry.item_string)
+		local item = new("Item"):Item(entry.item_string)
 		if item.base and ((not slotName) or self.itemsTab:IsItemValidForSlot(item, slotName)) then
 			t_insert(itemsSafe, entry)
 		end
@@ -2191,8 +2225,8 @@ function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, ro
 		return selectedNodeId and self.itemsTab.sockets[selectedNodeId] or activeSlot
 	end
 	local nameColor = slotTbl.unique and colorCodes.UNIQUE or "^7"
-	controls["name" .. row_idx] = new("LabelControl", top_pane_alignment_ref, { 0, row_idx * (row_height + row_vertical_padding), 135, row_height - 4 }, nameColor .. slotTbl.slotName)
-	controls["bestButton" .. row_idx] = new("ButtonControl", { "LEFT", controls["name" .. row_idx], "LEFT" }, { 135 + 8, 0, 80, row_height }, "Find best", function()
+	controls["name" .. row_idx] = new("LabelControl"):LabelControl(top_pane_alignment_ref, { 0, row_idx * (row_height + row_vertical_padding), 135, row_height - 4 }, nameColor .. slotTbl.slotName)
+	controls["bestButton" .. row_idx] = new("ButtonControl"):ButtonControl({ "LEFT", controls["name" .. row_idx], "LEFT" }, { 135 + 8, 0, 80, row_height }, "Find best", function()
 		self.tradeQueryGenerator:RequestQuery(activeSlot, { slotTbl = slotTbl, controls = controls, row_idx = row_idx }, self.statSortSelectionList, function(context, query, errMsg)
 			if errMsg then
 				self:SetNotice(context.controls.pbNotice, colorCodes.NEGATIVE .. errMsg)
@@ -2223,7 +2257,7 @@ function TradeQueryClass:PriceItemRowDisplay(row_idx, top_pane_alignment_ref, ro
 					-- replace eldritch mods or enchants if the user requested
 					-- so in TradeQueryGenerator
 					for i, _ in ipairs(itemsSafe) do
-						local item = new("Item", itemsSafe[i].item_string)
+						local item = new("Item"):Item(itemsSafe[i].item_string)
 						-- assume the user will add quality if they buy the item
 						item:NormaliseQuality()
 						if self.tradeQueryGenerator.lastIncludeEldritch == "Copy Current" or
@@ -2271,7 +2305,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 		itemSlotHelper.DrawViewer(self.itemsTab, nodeId, viewerX, viewerY, boxSize, boxSize)
 	end
 	local pbURL
-	controls["uri"..row_idx] = new("EditControl", { "TOPLEFT", controls["bestButton"..row_idx], "TOPRIGHT"}, {8, 0, 514, row_height}, nil, nil, "^%C\t\n", nil, function(buf)
+	controls["uri"..row_idx] = new("EditControl"):EditControl({ "TOPLEFT", controls["bestButton"..row_idx], "TOPRIGHT"}, {8, 0, 514, row_height}, nil, nil, "^%C\t\n", nil, function(buf)
 		local subpath = buf:match(self.hostNamePattern .. "trade/search/(.+)$") or ""
 		local paths = {}
 		for path in subpath:gmatch("[^/]+") do
@@ -2298,7 +2332,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 			tooltip:AddLine(16, "Control + click to open in web-browser")
 		end
 	end
-	controls["priceButton"..row_idx] = new("ButtonControl", { "TOPLEFT", controls["uri"..row_idx], "TOPRIGHT"}, {8, 0, 100, row_height}, "Price Item",
+	controls["priceButton"..row_idx] = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls["uri"..row_idx], "TOPRIGHT"}, {8, 0, 100, row_height}, "Price Item",
 		function()
 			controls["priceButton"..row_idx].label = "Searching..."
 			local url = controls["uri" .. row_idx].buf
@@ -2319,13 +2353,18 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 				controls["priceButton"..row_idx].label = "Price Item"
 			end)
 		end)
+	local jewelUniques = {
+		Megalomaniac = true,
+		["Watcher's Eye"] = true,
+	}
 	controls["priceButton"..row_idx].enabled = function()
 		local isAuthorized = main.api.authToken ~= nil
 		local validURL = controls["uri"..row_idx].validURL
 		local isSearching = controls["priceButton"..row_idx].label == "Searching..."
+		local requiresJewelSlot = not slotTbl.unique or jewelUniques[slotTbl.slotName]
 		local selectedJewelSlot = slotTbl.selectedJewelNodeId and self.itemsTab.sockets[slotTbl.selectedJewelNodeId]
 		local hasRequiredJewelSlot = not slotTbl.unique or selectedJewelSlot and not selectedJewelSlot.inactive
-		return isAuthorized and validURL and not isSearching and hasRequiredJewelSlot
+		return isAuthorized and validURL and not isSearching and (hasRequiredJewelSlot or not requiresJewelSlot)
 	end
 	controls["priceButton"..row_idx].tooltipFunc = function(tooltip)
 		tooltip:Clear()
@@ -2333,18 +2372,18 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 			tooltip:AddLine(16, "You must log in to use the search feature")
 		elseif not controls["uri"..row_idx].validURL then
 			tooltip:AddLine(16, "Enter a valid trade URL")
-		elseif slotTbl.unique and (not slotTbl.selectedJewelNodeId or not self.itemsTab.sockets[slotTbl.selectedJewelNodeId] or self.itemsTab.sockets[slotTbl.selectedJewelNodeId].inactive) then
+		elseif jewelUniques[slotTbl.slotName] and (not slotTbl.selectedJewelNodeId or not self.itemsTab.sockets[slotTbl.selectedJewelNodeId] or self.itemsTab.sockets[slotTbl.selectedJewelNodeId].inactive) then
 			tooltip:AddLine(16, "Requires an active Jewel Socket")
 		end
 	end
 	local clampItemIndex = function(index)
 		return m_min(m_max(index or 1, 1), self.sortedResultTbl[row_idx] and #self.sortedResultTbl[row_idx] or 1)
 	end
-	controls["changeButton" .. row_idx] = new("ButtonControl", { "LEFT", controls["name" .. row_idx], "LEFT" }, { 135 + 8, 0, 80, row_height }, "<< Search", function()
+	controls["changeButton" .. row_idx] = new("ButtonControl"):ButtonControl({ "LEFT", controls["name" .. row_idx], "LEFT" }, { 135 + 8, 0, 80, row_height }, "<< Search", function()
 		self:ResetResultRow(row_idx)
 	end)
 	controls["changeButton"..row_idx].shown = function() return self.resultTbl[row_idx] end
-	controls["resultDropdown" .. row_idx] = new("DropDownControl", { "TOPLEFT", controls["changeButton" .. row_idx], "TOPRIGHT" }, { 8, 0, 351, row_height }, {}, function(index)
+	controls["resultDropdown" .. row_idx] = new("DropDownControl"):DropDownControl({ "TOPLEFT", controls["changeButton" .. row_idx], "TOPRIGHT" }, { 8, 0, 351, row_height }, {}, function(index)
 		self.itemIndexTbl[row_idx] = self.sortedResultTbl[row_idx][index].index
 		self:SetFetchResultReturn(row_idx, self.itemIndexTbl[row_idx])
 	end)
@@ -2373,7 +2412,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 		if not result then
 			return
 		end
-		local item = new("Item", result.item_string)
+		local item = new("Item"):Item(result.item_string)
 		tooltip:Clear()
 		local tooltipSlot = slotTbl.selectedJewelNodeId and self.itemsTab.sockets[slotTbl.selectedJewelNodeId] or activeSlot
 		self.itemsTab:AddItemTooltip(tooltip, item, tooltipSlot)
@@ -2381,7 +2420,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 		tooltip:AddSeparator(10)
 		tooltip:AddLine(16, string.format("^7Price: %s %s", result.amount, result.currency))
 	end
-	controls["importButton"..row_idx] = new("ButtonControl", { "TOPLEFT", controls["resultDropdown"..row_idx], "TOPRIGHT"}, {8, 0, 100, row_height}, "Import Item", function()
+	controls["importButton"..row_idx] = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls["resultDropdown"..row_idx], "TOPRIGHT"}, {8, 0, 100, row_height}, "Import Item", function()
 		self.itemsTab:CreateDisplayItemFromRaw(self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].item_string)
 		local item = self.itemsTab.displayItem
 		-- pass "true" to not auto equip it as we will have our own logic
@@ -2401,7 +2440,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 		local selected_result_index = self.itemIndexTbl[row_idx]
 		local item_string = self.resultTbl[row_idx][selected_result_index].item_string
 		if selected_result_index and item_string then
-			local item = new("Item", item_string)
+			local item = new("Item"):Item(item_string)
 			local tooltipSlot = slotTbl.selectedJewelNodeId and self.itemsTab.sockets[slotTbl.selectedJewelNodeId] or activeSlot
 			self.itemsTab:AddItemTooltip(tooltip, item, tooltipSlot, true)
 			addMegalomaniacCompareToTooltipIfApplicable(tooltip, selected_result_index)
@@ -2411,8 +2450,7 @@ you can add them, copy the link here, and press "Price Item" to evaluate the ite
 		return self.itemIndexTbl[row_idx] and self.resultTbl[row_idx][self.itemIndexTbl[row_idx]].item_string ~= nil
 	end
 	-- Whisper so we can copy to clipboard
-	controls["whisperButton" .. row_idx] = new("ButtonControl",
-		{ "TOPLEFT", controls["importButton" .. row_idx], "TOPRIGHT" }, { 8, 0, 155, row_height }, function()
+	controls["whisperButton" .. row_idx] = new("ButtonControl"):ButtonControl({ "TOPLEFT", controls["importButton" .. row_idx], "TOPRIGHT" }, { 8, 0, 155, row_height }, function()
 			local itemResult = self.itemIndexTbl[row_idx] and self.resultTbl[row_idx][self.itemIndexTbl[row_idx]]
 
 			if not itemResult then return "" end

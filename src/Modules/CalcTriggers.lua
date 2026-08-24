@@ -4,8 +4,9 @@
 -- Performs trigger rate calculations
 --
 
-local calcs = ...
-local pairs = pairs
+---@class Calcs
+local calcs = require("Modules.CalcBase")
+
 local ipairs = ipairs
 local t_insert = table.insert
 local t_remove = table.remove
@@ -1542,6 +1543,11 @@ local configTable = {
 				return not skill.skillTypes[SkillType.SummonsTotem] and skill.skillTypes[SkillType.Attack]
 			end
 		}
+	end,
+	["BloodShrineUniqueTriggeredExplodingToad"] = function(env)
+		local triggerChance = env.player.mainSkill.activeEffect.srcInstance.triggerChance + env.player.modDB:Sum("BASE", nil, "BloodShrineExplodingToadTriggerChance")
+		return {assumingEveryHitKills = true, triggerChance = m_min(triggerChance, 100),
+			triggerSkillCond = function(env, skill) return skill.skillTypes[SkillType.Damage] or skill.skillTypes[SkillType.Attack] end}
 	end,
 	["bursting toad"] = function(env)
 		local triggerInterval = m_huge

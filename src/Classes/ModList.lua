@@ -16,11 +16,15 @@ local bor = bit.bor
 
 local mod_createMod = modLib.createMod
 
-local ModListClass = newClass("ModList", "ModStore", function(self, parent)
-	self.ModStore(parent)
-end)
+---@class ModList: ModStore
+local ModListClass = newClass("ModList", "ModStore")
 
--- Fast equivalent of new("ModList", parent): bypasses the generic class machinery,
+function ModListClass:ModList(parent)
+	self:ModStore(parent)
+	return self
+end
+
+-- Fast equivalent of new("ModList"):ModList(parent): bypasses the generic class machinery,
 -- whose per-instance parent proxies and closures dominate the cost of creating the
 -- many short-lived ModLists used during calculations
 function newModList(parent)

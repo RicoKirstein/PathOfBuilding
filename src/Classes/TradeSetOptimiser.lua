@@ -37,14 +37,17 @@ local m_huge = math.huge
 local RESIST_STATS = { "FireResistTotal", "ColdResistTotal", "LightningResistTotal" }
 
 ---@class TradeSetOptimiser
-local TradeSetOptimiserClass = newClass("TradeSetOptimiser", function(self, itemsTab)
+local TradeSetOptimiserClass = newClass("TradeSetOptimiser")
+
+function TradeSetOptimiserClass:TradeSetOptimiser(itemsTab)
 	self.itemsTab = itemsTab
 	self.build = itemsTab.build
 	-- How often the solve coroutine comes up for air. Small enough that the
 	-- window keeps drawing, large enough that yielding is not the bottleneck.
 	self.measureChunk = 200
 	self.boundChunk = 20000
-end)
+	return self
+end
 
 ----------------
 -- Constraints --

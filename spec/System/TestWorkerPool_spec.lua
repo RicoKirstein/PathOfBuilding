@@ -440,10 +440,10 @@ describe("WorkerPool", function()
 			assert.is_not_nil(statEntry)
 			local rawBetter = "New Item\nCoral Ring\n+100 to maximum Life"
 			local rawWorse = "New Item\nCoral Ring\n+20 to maximum Life"
-			local items = { new("Item", rawBetter), new("Item", rawWorse) }
+			local items = { new("Item"):Item(rawBetter), new("Item"):Item(rawWorse) }
 			-- Interactive truth: the item DB list builder's synchronous path (the
 			-- pool is unavailable under busted)
-			local control = new("ItemDBControl", nil, { 0, 0, 100, 100 }, build.itemsTab, { list = items }, "RARE")
+			local control = new("ItemDBControl"):ItemDBControl(nil, { 0, 0, 100, 100 }, build.itemsTab, { list = items }, "RARE")
 			-- Sort by a dropdown entry as BuildSortOrder builds it, not by the raw
 			-- data.powerStatList entry: the two are not interchangeable, because the
 			-- dropdown's `label` carries a "Sort by " prefix for display and so cannot
@@ -487,7 +487,7 @@ describe("WorkerPool", function()
 			-- option cannot be resolved the handler has no way to measure anything,
 			-- every candidate keeps its -inf placeholder, and the list silently comes
 			-- back unsorted -- so assert the two sides agree for every option.
-			local control = new("ItemDBControl", nil, { 0, 0, 100, 100 }, build.itemsTab, { list = { } }, "RARE")
+			local control = new("ItemDBControl"):ItemDBControl(nil, { 0, 0, 100, 100 }, build.itemsTab, { list = { } }, "RARE")
 			local checked = 0
 			for _, option in ipairs(control.sortDropList) do
 				if option.stat then
@@ -568,7 +568,7 @@ describe("WorkerPool", function()
 		end)
 
 		it("activating a spec with a pending rebuild flushes it", function()
-			local spec2 = new("PassiveSpec", build, build.spec.treeVersion)
+			local spec2 = new("PassiveSpec"):PassiveSpec(build, build.spec.treeVersion)
 			spec2.title = "WorkerPool spec"
 			table.insert(build.treeTab.specList, spec2)
 			spec2.rebuildPending = true
@@ -582,7 +582,7 @@ describe("WorkerPool", function()
 			-- is the one way a spec gets read without being switched to. Unbuilt, it
 			-- has no allocatedMasteryTypes for CalcSetup to copy
 			local source = build.treeTab.specList[1]
-			local copy = new("PassiveSpec", build, source.treeVersion)
+			local copy = new("PassiveSpec"):PassiveSpec(build, source.treeVersion)
 			copy.title = "Second"
 			copy.jewels = copyTable(source.jewels)
 			copy:RestoreUndoState(source:CreateUndoState())

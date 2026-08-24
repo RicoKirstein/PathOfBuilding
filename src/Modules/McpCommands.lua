@@ -826,7 +826,7 @@ commands["items.set"] = function(params)
 	if not slot then
 		error("unknown slot '" .. slotName .. "'", 0)
 	end
-	local newItem = new("Item", raw)
+	local newItem = new("Item"):Item(raw)
 	if not newItem.base then
 		error("could not parse that item text; make sure it is a full in-game item copy including the Item Class and Rarity header", 0)
 	end
@@ -890,7 +890,7 @@ commands["items.preview"] = function(params)
 	end
 	local repItem
 	if params.text then
-		repItem = new("Item", tostring(params.text))
+		repItem = new("Item"):Item(tostring(params.text))
 		if not repItem.base then
 			error("could not parse that item text", 0)
 		end
@@ -964,7 +964,7 @@ commands["items.evaluate_sets"] = function(params)
 	local function itemFor(text)
 		local item = parsed[text]
 		if not item then
-			item = new("Item", tostring(text))
+			item = new("Item"):Item(tostring(text))
 			if not item.base then
 				error("could not parse an item; make sure it is a full item copy including the Item Class and Rarity header", 0)
 			end

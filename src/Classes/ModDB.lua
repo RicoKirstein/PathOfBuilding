@@ -17,10 +17,14 @@ local bor = bit.bor
 
 local mod_createMod = modLib.createMod
 
-local ModDBClass = newClass("ModDB", "ModStore", function(self, parent)
-	self.ModStore(parent)
+---@class ModDB: ModStore
+local ModDBClass = newClass("ModDB", "ModStore")
+
+function ModDBClass:ModDB(parent)
+	self:ModStore(parent)
 	self.mods = { }
-end)
+	return self
+end
 
 function ModDBClass:AddMod(mod)
 	local name = mod.name
@@ -139,7 +143,9 @@ function ModDBClass:SumInternal(context, modType, cfg, flags, keywordFlags, sour
 				local mod = modList[i]
 				if mod.type == modType and band(flags, mod.flags) == mod.flags and MatchKeywordFlags(keywordFlags, mod.keywordFlags) and (not source or ( mod.source and mod.source:match("[^:]+") == source )) then
 					if mod[1] then
-						globalLimits = globalLimits or { }
+						if not globalLimits then
+							globalLimits = {}
+						end
 						local value = context:EvalMod(mod, cfg, globalLimits) or 0
 						result = result + value
 					else
@@ -168,7 +174,9 @@ function ModDBClass:MoreInternal(context, cfg, flags, keywordFlags, source, ...)
 				if mod.type == "MORE" and band(flags, mod.flags) == mod.flags and MatchKeywordFlags(keywordFlags, mod.keywordFlags) and (not source or mod.source:match("[^:]+") == source) then
 					local value
 					if mod[1] then
-						globalLimits = globalLimits or { }
+						if not globalLimits then
+							globalLimits = {}
+						end
 						value = context:EvalMod(mod, cfg, globalLimits) or 0
 					else
 						value = mod.value or 0
@@ -278,7 +286,9 @@ function ModDBClass:TabulateInternal(context, result, modType, cfg, flags, keywo
 				if (mod.type == modType or not modType) and band(flags, mod.flags) == mod.flags and MatchKeywordFlags(keywordFlags, mod.keywordFlags) and (not source or mod.source:match("[^:]+") == source) then
 					local value
 					if mod[1] then
-						globalLimits = globalLimits or { }
+						if not globalLimits then
+							globalLimits = {}
+						end
 						value = context:EvalMod(mod, cfg, globalLimits)
 					else
 						value = mod.value

@@ -10,7 +10,8 @@
 -- modifiers are composed; nodes carrying anything else must be evaluated exactly
 -- by the caller and can be fed back in via LearnExact for path composition.
 --
-local calcs = ...
+---@class Calcs
+local calcs = require("Modules.CalcBase")
 
 local pairs = pairs
 local ipairs = ipairs

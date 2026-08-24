@@ -68,9 +68,9 @@ function trade:Requests()
 		-- ProcessQueue reads main.api.authToken on every request; the Trader popup
 		-- creates it lazily and we may well run before it has ever been opened
 		if not main.api then
-			main.api = new("PoEAPI", main.lastToken, main.lastRefreshToken, main.tokenExpiry)
+			main.api = new("PoEAPI"):PoEAPI(main.lastToken, main.lastRefreshToken, main.tokenExpiry)
 		end
-		self.requests = new("TradeQueryRequests")
+		self.requests = new("TradeQueryRequests"):TradeQueryRequests()
 	end
 	return self.requests
 end
@@ -79,7 +79,7 @@ end
 -- a stub is enough and keeps this independent of whether the Trader popup is open
 function trade:Generator(build)
 	if not self.generator or self.generatorBuild ~= build then
-		self.generator = new("TradeQueryGenerator", { itemsTab = build.itemsTab })
+		self.generator = new("TradeQueryGenerator"):TradeQueryGenerator({ itemsTab = build.itemsTab })
 		self.generatorBuild = build
 	end
 	return self.generator
@@ -285,7 +285,7 @@ end
 local function safeItems(build, entries, slotName)
 	local safe = { }
 	for _, entry in ipairs(entries or { }) do
-		local ok, item = pcall(function() return new("Item", entry.item_string) end)
+		local ok, item = pcall(function() return new("Item"):Item(entry.item_string) end)
 		if ok and item and item.base then
 			if (not slotName) or build.itemsTab:IsItemValidForSlot(item, slotName) then
 				entry.parsed = item
@@ -450,7 +450,7 @@ commands["trade.item_link"] = function(params)
 	if not entry then
 		error("that item is not in job " .. job.id .. "; pass itemId from the job's results, or index", 0)
 	end
-	local item = entry.parsed or new("Item", entry.item_string)
+	local item = entry.parsed or new("Item"):Item(entry.item_string)
 	local maxStats = tonumber(params.maxStats) or 4
 	local preferLocal = isLocalContext(item)
 
@@ -783,7 +783,7 @@ commands["trade.evaluate"] = function(params)
 
 	local results = { }
 	for index, entry in ipairs(job.raw or { }) do
-		local item = entry.parsed or new("Item", entry.item_string)
+		local item = entry.parsed or new("Item"):Item(entry.item_string)
 		item:NormaliseQuality()
 		item:BuildModList()
 		local newOutput = calcFunc({ repSlotName = slotName, repItem = item }, true)

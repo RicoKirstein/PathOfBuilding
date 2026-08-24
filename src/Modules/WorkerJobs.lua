@@ -72,7 +72,7 @@ function jobHandlers.itemPower(payload)
 			tostring(payload.stat), tostring(payload.statLabel)) }
 	end
 	for key, raw in pairs(payload.items) do
-		local item = new("Item", raw)
+		local item = new("Item"):Item(raw)
 		if item.base then
 			results[key] = build.itemsTab:MeasureItemPower(item, statEntry, calcFunc, useFullDPS, payload.slots)
 		end
