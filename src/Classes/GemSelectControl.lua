@@ -68,49 +68,13 @@ function GemSelectClass:GemSelectControl(anchor, rect, skillsTab, index, changeF
 end
 
 function GemSelectClass:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
-	local gemList = self.skillsTab.displayGroup.gemList
-	local displayGemList = self.skillsTab.displayGroup.displayGemList
-	local oldGem
+	local displayGroup = self.skillsTab.displayGroup
 
 	-- the imbuedSupport control actively switches to the latest index of the current displayGroup's gemList so we can use the canSupport filtering
 	if self.imbuedSelect then
-		self.index = #gemList + 1
+		self.index = #displayGroup.gemList + 1
 	end
-	if gemList[self.index] then
-		oldGem = copyTable(gemList[self.index], true)
-	else
-		gemList[self.index] = {
-			level = gemData.naturalMaxLevel,
-			quality = self.skillsTab.defaultGemQuality or 0,
-			count = 1,
-			enabled = true,
-			enableGlobal1 = true,
-			enableGlobal2 = true,
-			gemId = gemData.id,
-			nameSpec = gemData.name,
-			skillId = gemData.grantedEffectId
-		}
-	end
-
-	-- Create gemInstance to represent the hovered gem
-	local gemInstance = gemList[self.index]
-	gemInstance.level = self.skillsTab:ProcessGemLevel(gemData, self.imbuedSelect)
-	gemInstance.gemData = gemData
-	gemInstance.displayEffect = nil
-	-- Calculate the impact of using this gem
-	local output = calcFunc(nil, useFullDPS)
-	-- Put the original gem back into the list
-	if oldGem then
-		gemInstance.gemData = oldGem.gemData
-		gemInstance.level = oldGem.level
-		gemInstance.displayEffect = oldGem.displayEffect
-	else
-		gemList[self.index] = nil
-	end
-	
-	self.skillsTab.displayGroup.displayGemList = displayGemList
-	
-	return output, gemInstance
+	return self.skillsTab:CalcGemSwapOutput(displayGroup, self.index, gemData, calcFunc, useFullDPS, self.imbuedSelect)
 end
 
 function GemSelectClass:PopulateGemList()
@@ -412,6 +376,19 @@ function GemSelectClass:SortCurrentList()
 	end
 end
 
+-- Records a candidate's measured DPS and its comparison colour against the
+-- baseline
+function GemSelectClass:SetSortedDps(sortCache, gemId, dps)
+	sortCache.dps[gemId] = dps
+	if dps > sortCache.baseDPS then
+		sortCache.dpsColor[gemId] = "^x228866"
+	elseif dps < sortCache.baseDPS then
+		sortCache.dpsColor[gemId] = "^xFF4422"
+	else
+		sortCache.dpsColor[gemId] = "^xFFFF66"
+	end
+end
+
 function GemSelectClass:DPSBuilder()
 	local sortCache = self.sortCache
 	if not sortCache or not sortCache.pendingGems then return end
@@ -419,7 +396,6 @@ function GemSelectClass:DPSBuilder()
 	local pending = sortCache.pendingGems
 	local calcFunc = sortCache.calcFunc
 	local useFullDPS = sortCache.useFullDPS
-	local baseDPS = sortCache.baseDPS
 	local dpsField = sortCache.dpsField
 	local start = GetTime()
 
@@ -427,14 +403,7 @@ function GemSelectClass:DPSBuilder()
 		local gemData = self.gems[gemId]
 		if gemData then
 			local output = self:CalcOutputWithThisGem(calcFunc, gemData, useFullDPS)
-			sortCache.dps[gemId] = (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
-			if sortCache.dps[gemId] > baseDPS then
-				sortCache.dpsColor[gemId] = "^x228866"
-			elseif sortCache.dps[gemId] < baseDPS then
-				sortCache.dpsColor[gemId] = "^xFF4422"
-			else
-				sortCache.dpsColor[gemId] = "^xFFFF66"
-			end
+			self:SetSortedDps(sortCache, gemId, self.skillsTab.ExtractGemDps(output, dpsField))
 		end
 		local now = GetTime()
 		if now - start > 50 then

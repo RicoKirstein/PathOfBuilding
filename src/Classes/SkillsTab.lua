@@ -1156,6 +1156,60 @@ function SkillsTabClass:ProcessGemLevel(gemData, imbued)
 	end
 end
 
+-- Calculates the build with `gemData` staged into group.gemList[index], restoring
+-- the previous state afterwards, and returns the output plus the gem instance it
+-- staged. Existing gems keep their own quality and enablement; empty slots get a
+-- default instance. Used by the gem dropdown (GemSelectControl:CalcOutputWithThisGem).
+function SkillsTabClass:CalcGemSwapOutput(group, index, gemData, calcFunc, useFullDPS, imbued)
+	local gemList = group.gemList
+	local displayGemList = group.displayGemList
+	local oldGem
+	if gemList[index] then
+		oldGem = copyTable(gemList[index], true)
+	else
+		gemList[index] = {
+			level = gemData.naturalMaxLevel,
+			quality = self.defaultGemQuality or 0,
+			count = 1,
+			enabled = true,
+			enableGlobal1 = true,
+			enableGlobal2 = true,
+			gemId = gemData.id,
+			nameSpec = gemData.name,
+			skillId = gemData.grantedEffectId
+		}
+	end
+
+	-- Create gemInstance to represent the hovered gem
+	local gemInstance = gemList[index]
+	gemInstance.level = self:ProcessGemLevel(gemData, imbued)
+	gemInstance.gemData = gemData
+	gemInstance.displayEffect = nil
+	-- Calculate the impact of using this gem
+	local ok, output = pcall(calcFunc, nil, useFullDPS)
+	-- Put the original gem back into the list
+	if oldGem then
+		gemInstance.gemData = oldGem.gemData
+		gemInstance.level = oldGem.level
+		gemInstance.displayEffect = oldGem.displayEffect
+	else
+		gemList[index] = nil
+	end
+	-- The calculation rebuilds the group's display list around the staged gem;
+	-- put the original back too, or the caller is left looking at the candidate
+	group.displayGemList = displayGemList
+	if not ok then
+		-- The staged gem is out of the group again, so the error can propagate
+		error(output, 0)
+	end
+	return output, gemInstance
+end
+
+-- The output value the gem dropdown sorts by
+function SkillsTabClass.ExtractGemDps(output, dpsField)
+	return (dpsField == "FullDPS" and output[dpsField] ~= nil and output[dpsField]) or (output.Minion and output.Minion.CombinedDPS) or (output[dpsField] ~= nil and output[dpsField]) or 0
+end
+
 -- Processes the given socket group, filling in information that will be used for display or calculations
 ---@param socketGroup table
 function SkillsTabClass:ProcessSocketGroup(socketGroup)
